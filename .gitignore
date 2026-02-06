@@ -22,6 +22,11 @@ wheels/
 .vscode/
 venv/
 env/
+
+# API runtime
+logs/
+data/
+tmp/
 # Local secrets
 .env
 

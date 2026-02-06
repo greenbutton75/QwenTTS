@@ -16,7 +16,7 @@
 
 **[Нейро-Софт](https://t.me/neuroport)** — репаки и портативки полезных нейросетей
 
-## Быстрый старт (Windows)
+## Быстрый старт (Windows, локальный UI)
 
 1. Установите зависимости: `portable/install.bat`
 2. Запустите UI: `portable/run.bat`
@@ -43,6 +43,65 @@
 - Портативный Python и сторонние бинарники (SoX)
 
 Все такие папки добавлены в `.gitignore`.
+
+## VVK API (cloud-ready)
+
+Для прод-развертывания без UI используется FastAPI-сервис из папки `server/`.
+Он поддерживает только VVK-сценарии:
+
+- Создание профиля голоса (reference + ref_text)
+- Очередь генерации фраз
+- Polling статуса по phrase_id
+- Админка (basic auth) с очередью и статистикой
+
+### Переменные окружения
+
+Смотрите шаблон `D:\Work\ML\Voice\QwenTTS\.env.example`.
+Ключевые переменные:
+
+- `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`, `AWS_REGION`, `S3_BUCKET_NAME`
+- `ADMIN_USER`, `ADMIN_PASSWORD`
+- `MODEL_SIZE` (по умолчанию `1.7B`)
+- `SQLITE_PATH`, `LOG_DIR`
+
+### S3 структура
+
+```
+s3://rixtrema-qwentts/support/{support_id}/
+  voices/{voice_id}/reference.wav
+  voices/{voice_id}/voice.json
+  voices/{voice_id}/prompt.pt
+  phrases/{phrase_id}.wav
+  phrases/{phrase_id}.json
+```
+
+### API
+
+`POST /profiles` (multipart/form-data)
+- `support_id`, `voice_name`, `audio` (mp3/wav), `ref_text` (opt), `xvector_only` (opt)
+
+`POST /phrases` (json)
+```
+{
+  "support_id": "user1_46847",
+  "voice_id": "voice_7f1c2b3e",
+  "phrase_id": "phrase_91a0c",
+  "text": "Want to sell you"
+}
+```
+
+`GET /phrases/{phrase_id}?support_id=...`
+
+`GET /profiles/{voice_id}?support_id=...`
+
+`GET /admin` (basic auth)
+
+### Docker
+
+```
+docker build -t qwentts .
+docker run --gpus all --env-file .env -p 8000:8000 qwentts
+```
 
 ## Возможности
 
