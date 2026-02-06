@@ -51,6 +51,8 @@ portable/*.m4a
 cache/
 downloads/
 models/
+!qwen_tts/core/models/
+!qwen_tts/core/models/**
 output/
 profiles/
 voices/
