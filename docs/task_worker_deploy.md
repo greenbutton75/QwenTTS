@@ -83,3 +83,8 @@ chmod +x /workspace/QwenTTS/scripts/run_api.sh /workspace/QwenTTS/scripts/run_wo
 nohup /workspace/QwenTTS/scripts/run_api.sh > /workspace/QwenTTS/logs/uvicorn.out 2>&1 &
 nohup /workspace/QwenTTS/scripts/run_worker.sh > /workspace/QwenTTS/logs/task_worker.out 2>&1 &
 ```
+
+## Resilience
+
+The worker loop catches unexpected errors (e.g., DNS failures) and retries with exponential backoff (up to 5 minutes).
+

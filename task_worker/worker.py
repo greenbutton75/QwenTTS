@@ -162,7 +162,15 @@ def process_phrases_batch(state: HealthState) -> None:
 
 
 def run_loop(state: HealthState) -> None:
+    backoff = 5
     while True:
-        process_create_profiles(state)
-        process_phrases_batch(state)
-        time.sleep(15)
+        try:
+            process_create_profiles(state)
+            process_phrases_batch(state)
+            backoff = 5
+            time.sleep(15)
+        except Exception as exc:
+            logger.exception("worker loop error: %s", exc)
+            state.set_error(str(exc))
+            time.sleep(backoff)
+            backoff = min(backoff * 2, 300)
