@@ -16,6 +16,11 @@ AWS_ACCESS_KEY_ID=...
 AWS_SECRET_ACCESS_KEY=...
 AWS_REGION=us-east-1
 S3_BUCKET_NAME=rixtrema-qwentts
+
+TASK_WORKER_HEALTH_PORT=8010
+TASK_WORKER_LOG_DIR=/workspace/QwenTTS/logs
+TASK_WORKER_LOG_MAX_BYTES=10485760
+TASK_WORKER_LOG_BACKUPS=7
 ```
 
 ## Install
@@ -28,6 +33,22 @@ pip install -r task_worker/requirements.txt
 
 ```
 python -m task_worker.main
+```
+
+## Health
+
+```
+http://localhost:8010/health
+```
+
+## systemd (auto-restart)
+
+```
+sudo cp /workspace/QwenTTS/docs/systemd/task_worker.service /etc/systemd/system/task_worker.service
+sudo systemctl daemon-reload
+sudo systemctl enable task_worker
+sudo systemctl start task_worker
+sudo systemctl status task_worker
 ```
 
 ## Notes

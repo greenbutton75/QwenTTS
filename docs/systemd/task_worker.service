@@ -1,0 +1,14 @@
+[Unit]
+Description=QwenTTS Task Worker
+After=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=/workspace/QwenTTS
+EnvironmentFile=/etc/qwentts.env
+ExecStart=/venv/main/bin/python -m task_worker.main
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

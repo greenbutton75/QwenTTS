@@ -28,3 +28,8 @@ MAX_WAIT_SECONDS = int(os.getenv("MAX_WAIT_SECONDS", "1800"))
 
 STAGE_PROCESSING = os.getenv("STAGE_PROCESSING", "PROCESSING")
 
+HEALTH_PORT = int(os.getenv("TASK_WORKER_HEALTH_PORT", "8010"))
+
+LOG_DIR = os.getenv("TASK_WORKER_LOG_DIR", "/workspace/QwenTTS/logs")
+LOG_MAX_BYTES = int(os.getenv("TASK_WORKER_LOG_MAX_BYTES", "10485760"))
+LOG_BACKUPS = int(os.getenv("TASK_WORKER_LOG_BACKUPS", "7"))

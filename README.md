@@ -212,6 +212,11 @@ AWS_ACCESS_KEY_ID=...
 AWS_SECRET_ACCESS_KEY=...
 AWS_REGION=us-east-1
 S3_BUCKET_NAME=rixtrema-qwentts
+
+TASK_WORKER_HEALTH_PORT=8010
+TASK_WORKER_LOG_DIR=/workspace/QwenTTS/logs
+TASK_WORKER_LOG_MAX_BYTES=10485760
+TASK_WORKER_LOG_BACKUPS=7
 ```
 
 ### Запуск (локально на GPU-инстансе)
@@ -220,6 +225,9 @@ S3_BUCKET_NAME=rixtrema-qwentts
 pip install -r task_worker/requirements.txt
 python -m task_worker.main
 ```
+
+Health:
+`http://localhost:8010/health`
 
 ## Task Submitter (local)
 

@@ -1,8 +1,9 @@
 import logging
 import time
-from typing import Any, Dict, List
+from typing import Any, Dict
 
 from .config import MAX_WAIT_SECONDS, PHRASE_PAGE_SIZE, PHRASE_POLL_INTERVAL, PROFILE_POLL_INTERVAL, STAGE_PROCESSING
+from .health import HealthState
 from .qwen_client import create_phrase, create_profile, get_phrase_status, get_profile_status
 from .s3_utils import object_exists, read_json
 from .task_api import (
@@ -64,8 +65,9 @@ def _profile_ready_in_s3(support_id: str, voice_id: str) -> bool:
         return False
 
 
-def process_create_profiles() -> None:
+def process_create_profiles(state: HealthState) -> None:
     tasks = list_tasks(task_type="QWEN_TTS_CREATE_PROFILE", statuses=["NEW"])
+    state.mark_profile_poll(len(tasks))
     if not tasks:
         return
 
@@ -80,11 +82,13 @@ def process_create_profiles() -> None:
 
         if not support_id or not voice_id or not voice_name:
             failed_task(task_id, error="missing support_id/voice_id/voice_name")
+            state.inc_profile_failed()
             continue
 
         sample_key = _sample_key(support_id, voice_id)
         if not object_exists(sample_key):
             failed_task(task_id, error=f"sample not found: {sample_key}")
+            state.inc_profile_failed()
             continue
 
         try:
@@ -93,6 +97,7 @@ def process_create_profiles() -> None:
             result = _wait_profile(support_id, voice_id)
             if result.get("status") == "done":
                 complete_task(task_id, data="done")
+                state.inc_profile_success()
                 create_task(
                     "QWEN_TTS_READY_PROFILE",
                     None,
@@ -100,16 +105,20 @@ def process_create_profiles() -> None:
                 )
             else:
                 failed_task(task_id, error=result.get("error", "profile failed"))
+                state.inc_profile_failed()
         except Exception as exc:
             failed_task(task_id, error=str(exc))
+            state.inc_profile_failed()
+            state.set_error(str(exc))
 
 
-def process_phrases_batch() -> None:
+def process_phrases_batch(state: HealthState) -> None:
     tasks = list_tasks(
         task_type="QWEN_TTS_PHRASE",
         statuses=["NEW"],
         page_size=PHRASE_PAGE_SIZE,
     )
+    state.mark_phrase_poll(len(tasks))
     if not tasks:
         return
 
@@ -123,6 +132,7 @@ def process_phrases_batch() -> None:
 
         if not support_id or not voice_id or not phrase_id or not text:
             failed_task(task_id, error="missing support_id/voice_id/phrase_id/text")
+            state.inc_phrase_failed()
             continue
 
         if not _profile_ready_in_s3(support_id, voice_id):
@@ -136,6 +146,7 @@ def process_phrases_batch() -> None:
             if result.get("status") == "done":
                 public_url = result.get("public_url", "")
                 complete_task(task_id, data=public_url)
+                state.inc_phrase_success()
                 create_task(
                     "QWEN_TTS_READY_PHRASE",
                     None,
@@ -143,13 +154,15 @@ def process_phrases_batch() -> None:
                 )
             else:
                 failed_task(task_id, error=result.get("error", "phrase failed"))
+                state.inc_phrase_failed()
         except Exception as exc:
             failed_task(task_id, error=str(exc))
+            state.inc_phrase_failed()
+            state.set_error(str(exc))
 
 
-def run_loop() -> None:
+def run_loop(state: HealthState) -> None:
     while True:
-        process_create_profiles()
-        process_phrases_batch()
+        process_create_profiles(state)
+        process_phrases_batch(state)
         time.sleep(15)
-
