@@ -221,6 +221,46 @@ pip install -r task_worker/requirements.txt
 python -m task_worker.main
 ```
 
+## Task Submitter (local)
+
+Локальный скрипт для:
+- загрузки sample в S3
+- создания задач в очереди
+
+### Переменные окружения
+
+```
+TASK_BASE_URL=https://rixtrema.net/api/async_task_manager
+USER_TOKEN=...
+
+AWS_ACCESS_KEY_ID=...
+AWS_SECRET_ACCESS_KEY=...
+AWS_REGION=us-east-1
+S3_BUCKET_NAME=rixtrema-qwentts
+```
+
+### Создать профиль
+
+```
+pip install -r task_submitter/requirements.txt
+python -m task_submitter.main create-profile ^
+  --support-id user1_46847 ^
+  --voice-id voice_21327ef670 ^
+  --voice-name "Name of Voice 2" ^
+  --ref-text "Each book in the series was originally published in hardcover format with a number of full-color illustrations spread throughout." ^
+  --sample "D:\\Work\\ML\\Voice\\Sveta.m4a"
+```
+
+### Создать фразу
+
+```
+python -m task_submitter.main create-phrase ^
+  --support-id user1_46847 ^
+  --voice-id voice_21327ef670 ^
+  --phrase-id phrase_006 ^
+  --text "Protect and distribute your assets according to your wishes with our comprehensive trust administration services."
+```
+
 ## Возможности
 
 ### Пресеты голосов
