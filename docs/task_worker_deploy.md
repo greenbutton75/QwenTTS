@@ -38,13 +38,13 @@ TASK_WORKER_LOG_BACKUPS=7
 ## Install
 
 ```
-pip install -r task_worker/requirements.txt
+/venv/main/bin/pip install -r task_worker/requirements.txt
 ```
 
 ## Run
 
 ```
-python -m task_worker.main
+/venv/main/bin/python -m task_worker.main
 ```
 
 ## Health
@@ -68,3 +68,8 @@ sudo systemctl status task_worker
 - The worker polls `QWEN_TTS_CREATE_PROFILE` and `QWEN_TTS_PHRASE`.
 - Profiles and phrases are checked in S3, so the instance can be interrupted safely.
 - Batch size for phrase tasks: 50 (no new fetch until batch finishes).
+
+## Token File Format
+
+The S3 env file must be **LF** and **no spaces around `=`** (e.g. `USER_TOKEN=...`).
+If it was edited on Windows, run: `sed -i 's/\r$//' /etc/qwentts.tokens.env` and `sed -i 's/ *= */=/' /etc/qwentts.tokens.env`.

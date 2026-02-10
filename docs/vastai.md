@@ -68,15 +68,24 @@ mkdir -p /workspace
 
 apt-get update
 apt-get install -y ffmpeg libsndfile1 sox
-pip install awscli
+/venv/main/bin/pip install awscli
 
-# build env file from template + tokens from S3
+# 1) Слить env из Template
 env | grep -E 'FINGERPRINT|AWS_|S3_|ADMIN_|MODEL_|LANGUAGE|SQLITE_PATH|LOG_|MAX_RETRIES|RETRY_BASE_SECONDS|S3_PREFIX|OPEN_BUTTON_PORT|TASK_WORKER_|QWEN_TTS_BASE_URL|TASK_BASE_URL|TASK_ENV_S3_KEY' > /etc/qwentts.env
+
+# 2) Подхватить его, чтобы S3 vars были в shell
 set -a
 source /etc/qwentts.env
 set +a
+
+# 3) Скачать токены и добавить
 aws s3 cp s3://$S3_BUCKET_NAME/$TASK_ENV_S3_KEY /etc/qwentts.tokens.env
+sed -i 's/
+$//' /etc/qwentts.tokens.env
+sed -i 's/ *= */=/' /etc/qwentts.tokens.env
 cat /etc/qwentts.tokens.env >> /etc/qwentts.env
+
+# 4) Перезагрузить env уже с токенами
 set -a
 source /etc/qwentts.env
 set +a
@@ -86,21 +95,23 @@ rm -rf QwenTTS
 git clone https://github.com/greenbutton75/QwenTTS.git
 cd QwenTTS
 
-pip install -r server/requirements.txt --no-deps
-pip uninstall -y numpy
-pip install numpy==1.26.4
+/venv/main/bin/pip install -r server/requirements.txt --no-deps
+/venv/main/bin/pip uninstall -y numpy
+/venv/main/bin/pip install numpy==1.26.4
 
-pip uninstall -y torch torchvision torchaudio transformers accelerate
-pip install torch==2.2.2+cu121 torchvision==0.17.2+cu121 torchaudio==2.2.2+cu121 --index-url https://download.pytorch.org/whl/cu121
-pip install transformers==4.57.3 accelerate==1.12.0
+/venv/main/bin/pip uninstall -y torch torchvision torchaudio transformers accelerate
+/venv/main/bin/pip install torch==2.2.2+cu121 torchvision==0.17.2+cu121 torchaudio==2.2.2+cu121 --index-url https://download.pytorch.org/whl/cu121
+/venv/main/bin/pip install -U huggingface_hub==0.34.0 safetensors==0.4.3 tokenizers==0.22.2 regex==2024.11.6
+/venv/main/bin/pip install transformers==4.57.3 accelerate==1.12.0
 
-pip install -r task_worker/requirements.txt
+/venv/main/bin/pip install -r task_worker/requirements.txt
 
 mkdir -p logs data tmp
 
-nohup uvicorn server.app:app --host 0.0.0.0 --port 8000 > logs/uvicorn.out 2>&1 &
+nohup /venv/main/bin/uvicorn server.app:app --host 0.0.0.0 --port 8000 > logs/uvicorn.out 2>&1 &
 nohup /venv/main/bin/python -m task_worker.main > logs/task_worker.out 2>&1 &
 ```
+
 
 ## 2) Start Instance Using the Template
 
@@ -116,6 +127,8 @@ Use:
 http://PublicIP:PORT/health
 http://PublicIP:PORT/admin
 ```
+Note: if `/admin` does not show a login prompt, open in another browser/incognito (HTTP Basic cache) and verify `ADMIN_USER/ADMIN_PASSWORD` in env.
+
 
 ## 3) Health Check (CLI)
 
