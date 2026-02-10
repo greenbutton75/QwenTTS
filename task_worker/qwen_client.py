@@ -20,7 +20,7 @@ def create_profile(
         "ref_text": ref_text or "",
         "xvector_only": str(bool(xvector_only)).lower(),
     }
-    r = requests.post(url, data=data, timeout=60)
+    r = requests.post(url, data=data, timeout=180)
     r.raise_for_status()
     return r.json()
 
@@ -40,7 +40,7 @@ def create_phrase(support_id: str, voice_id: str, phrase_id: str, text: str) -> 
         "phrase_id": phrase_id,
         "text": text,
     }
-    r = requests.post(url, json=payload, timeout=60)
+    r = requests.post(url, json=payload, timeout=180)
     r.raise_for_status()
     return r.json()
 
