@@ -1,5 +1,12 @@
 import os
+from pathlib import Path
 from typing import Optional
+
+from dotenv import load_dotenv
+
+
+load_dotenv()
+load_dotenv(Path(__file__).with_name(".env"), override=False)
 
 
 def _get_env(name: str, default: Optional[str] = None) -> str:
@@ -16,4 +23,3 @@ AWS_ACCESS_KEY_ID = _get_env("AWS_ACCESS_KEY_ID")
 AWS_SECRET_ACCESS_KEY = _get_env("AWS_SECRET_ACCESS_KEY")
 AWS_REGION = _get_env("AWS_REGION", "us-east-1")
 S3_BUCKET_NAME = _get_env("S3_BUCKET_NAME")
-

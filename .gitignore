@@ -30,6 +30,7 @@ tmp/
 # Local secrets
 .env
 qwentts.env
+**/.env
 
 # Portable runtime artifacts
 portable/cache/
