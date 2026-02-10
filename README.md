@@ -174,7 +174,10 @@ apt-get install -y ffmpeg libsndfile1 sox
 pip install awscli
 
 # build env file from template + tokens from S3
-env | grep -E 'FINGERPRINT|AWS_|S3_|ADMIN_|MODEL_|LANGUAGE|SQLITE_PATH|LOG_|MAX_RETRIES|RETRY_BASE_SECONDS|S3_PREFIX|OPEN_BUTTON_PORT|TASK_WORKER_|QWEN_TTS_BASE_URL|TASK_BASE_URL' > /etc/qwentts.env
+env | grep -E 'FINGERPRINT|AWS_|S3_|ADMIN_|MODEL_|LANGUAGE|SQLITE_PATH|LOG_|MAX_RETRIES|RETRY_BASE_SECONDS|S3_PREFIX|OPEN_BUTTON_PORT|TASK_WORKER_|QWEN_TTS_BASE_URL|TASK_BASE_URL|TASK_ENV_S3_KEY' > /etc/qwentts.env
+set -a
+source /etc/qwentts.env
+set +a
 aws s3 cp s3://$S3_BUCKET_NAME/$TASK_ENV_S3_KEY /etc/qwentts.tokens.env
 cat /etc/qwentts.tokens.env >> /etc/qwentts.env
 set -a
