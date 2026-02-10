@@ -186,6 +186,41 @@ http://PublicIP:PORT/health
 http://PublicIP:PORT/admin
 ```
 
+## Task Worker (GPU queue service)
+
+Сервис `task_worker` обрабатывает задачи из очереди:
+
+- `QWEN_TTS_CREATE_PROFILE`
+- `QWEN_TTS_PHRASE`
+
+И создает downstream задачи:
+
+- `QWEN_TTS_READY_PROFILE`
+- `QWEN_TTS_READY_PHRASE`
+
+### Переменные окружения
+
+```
+TASK_BASE_URL=https://rixtrema.net/api/async_task_manager
+USER_TOKEN=...
+SYSTEM_TOKEN=...
+FINGERPRINT=...
+
+QWEN_TTS_BASE_URL=http://127.0.0.1:8000
+
+AWS_ACCESS_KEY_ID=...
+AWS_SECRET_ACCESS_KEY=...
+AWS_REGION=us-east-1
+S3_BUCKET_NAME=rixtrema-qwentts
+```
+
+### Запуск (локально на GPU-инстансе)
+
+```
+pip install -r task_worker/requirements.txt
+python -m task_worker.main
+```
+
 ## Возможности
 
 ### Пресеты голосов
