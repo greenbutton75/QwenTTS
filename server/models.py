@@ -25,6 +25,7 @@ class PhraseStatusResponse(BaseModel):
     phrase_id: str
     status: str
     result_key: Optional[str] = None
+    public_url: Optional[str] = None
     text: Optional[str] = None
     voice_id: Optional[str] = None
     error: Optional[str] = None

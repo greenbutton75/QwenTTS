@@ -159,6 +159,22 @@ class TaskDB:
         finally:
             conn.close()
 
+    def stats_by_type(self) -> Dict[str, Dict[str, int]]:
+        conn = self._connect()
+        try:
+            rows = conn.execute(
+                "SELECT task_type, status, COUNT(1) AS cnt FROM tasks GROUP BY task_type, status"
+            ).fetchall()
+            out: Dict[str, Dict[str, int]] = {}
+            for r in rows:
+                t = r["task_type"]
+                if t not in out:
+                    out[t] = {"queued": 0, "running": 0, "done": 0, "failed": 0}
+                out[t][r["status"]] = int(r["cnt"])
+            return out
+        finally:
+            conn.close()
+
     def list_recent(self, limit: int = 50) -> list[Dict[str, Any]]:
         conn = self._connect()
         try:
@@ -169,4 +185,3 @@ class TaskDB:
             return [dict(r) for r in rows]
         finally:
             conn.close()
-

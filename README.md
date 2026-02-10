@@ -78,7 +78,8 @@ s3://rixtrema-qwentts/support/{support_id}/
 ### API
 
 `POST /profiles` (multipart/form-data)
-- `support_id`, `voice_name`, `audio` (mp3/wav), `ref_text` (opt), `xvector_only` (opt)
+- `support_id`, `voice_id`, `voice_name`, `ref_text` (opt), `xvector_only` (opt)
+- sample берётся из S3: `support/{support_id}/voices/{voice_id}/sample.wav`
 
 `POST /phrases` (json)
 ```
@@ -90,7 +91,7 @@ s3://rixtrema-qwentts/support/{support_id}/
 }
 ```
 
-`GET /phrases/{phrase_id}?support_id=...`
+`GET /phrases/{phrase_id}?support_id=...` (ответ содержит `public_url` на 60 дней)
 
 `GET /profiles/{voice_id}?support_id=...`
 

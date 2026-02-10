@@ -1,4 +1,3 @@
-import json
 import os
 import time
 import traceback
@@ -8,8 +7,15 @@ from .config import MAX_RETRIES, RETRY_BASE_SECONDS, S3_PREFIX
 from .db import TaskDB
 from qwen_tts import VoiceClonePromptItem
 
-from .s3_store import upload_file, upload_torch, write_json, download_torch
-from .tts import create_voice_prompt, generate_voice, load_audio, write_wav_temp
+from .s3_store import (
+    create_presigned_url,
+    download_bytes,
+    download_torch,
+    upload_file,
+    upload_torch,
+    write_json,
+)
+from .tts import bytes_to_wav_file, create_voice_prompt, generate_voice, load_audio, write_wav_temp
 
 
 def _voice_paths(support_id: str, voice_id: str) -> Dict[str, str]:
@@ -18,6 +24,7 @@ def _voice_paths(support_id: str, voice_id: str) -> Dict[str, str]:
         "reference": f"{base}/reference.wav",
         "voice_json": f"{base}/voice.json",
         "prompt": f"{base}/prompt.pt",
+        "sample": f"{base}/sample.wav",
     }
 
 
@@ -74,14 +81,16 @@ class Worker:
         voice_name = payload.get("voice_name") or voice_id
         ref_text = payload.get("ref_text") or None
         x_vector_only = bool(payload.get("x_vector_only", False))
-        local_audio_path = payload["local_audio_path"]
+        s3_sample_key = payload["s3_sample_key"]
 
         paths = _voice_paths(support_id, voice_id)
 
-        wav, sr = load_audio(local_audio_path)
+        sample_bytes = download_bytes(s3_sample_key)
+        sample_path = bytes_to_wav_file(sample_bytes, suffix=".wav")
+        wav, sr = load_audio(sample_path)
         prompt_item = create_voice_prompt((wav, sr), ref_text, x_vector_only)
 
-        upload_file(paths["reference"], local_audio_path, "audio/wav")
+        upload_file(paths["reference"], sample_path, "audio/wav")
         upload_torch(
             paths["prompt"],
             {
@@ -107,7 +116,7 @@ class Worker:
         write_json(paths["voice_json"], voice_json)
 
         try:
-            os.remove(local_audio_path)
+            os.remove(sample_path)
         except Exception:
             pass
 
@@ -134,6 +143,7 @@ class Worker:
         wav, sr = generate_voice(text, voice_prompt)
         tmp_path = write_wav_temp(wav, sr)
         upload_file(phrase_paths["audio"], tmp_path, "audio/wav")
+        public_url = create_presigned_url(phrase_paths["audio"], expires_seconds=60 * 24 * 3600)
 
         phrase_json = {
             "support_id": support_id,
@@ -142,6 +152,7 @@ class Worker:
             "text": text,
             "status": "done",
             "result_key": phrase_paths["audio"],
+            "public_url": public_url,
             "updated_at": int(time.time()),
         }
         write_json(phrase_paths["phrase_json"], phrase_json)

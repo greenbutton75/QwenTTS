@@ -1,18 +1,16 @@
+import json
 import os
 import threading
 import time
-import uuid
 from typing import Optional
 
-from fastapi import Depends, FastAPI, File, Form, HTTPException, UploadFile
-from fastapi.responses import HTMLResponse, JSONResponse
+from fastapi import Depends, FastAPI, Form, HTTPException
+from fastapi.responses import HTMLResponse
 from fastapi.security import HTTPBasic, HTTPBasicCredentials
 
 from .config import ADMIN_PASSWORD, ADMIN_USER, S3_PREFIX, SQLITE_PATH
 from .db import TaskDB
 from .logging_setup import setup_logging
-from pydub import AudioSegment
-
 from .models import (
     CreatePhraseRequest,
     CreatePhraseResponse,
@@ -20,7 +18,7 @@ from .models import (
     PhraseStatusResponse,
     ProfileStatusResponse,
 )
-from .s3_store import write_json, read_json
+from .s3_store import object_exists, read_json, write_json
 from .worker import Worker
 
 
@@ -70,42 +68,23 @@ def health() -> dict:
 @app.post("/profiles", response_model=CreateProfileResponse)
 async def create_profile(
     support_id: str = Form(...),
+    voice_id: str = Form(...),
     voice_name: str = Form(...),
-    audio: UploadFile = File(...),
     ref_text: Optional[str] = Form(None),
     xvector_only: Optional[bool] = Form(False),
 ) -> CreateProfileResponse:
     if not support_id.strip():
         raise HTTPException(status_code=400, detail="support_id is required")
+    if not voice_id.strip():
+        raise HTTPException(status_code=400, detail="voice_id is required")
     if not voice_name.strip():
         raise HTTPException(status_code=400, detail="voice_name is required")
 
-    voice_id = f"voice_{uuid.uuid4().hex[:10]}"
     paths = _voice_paths(support_id, voice_id)
 
-    tmp_dir = "tmp"
-    os.makedirs(tmp_dir, exist_ok=True)
-    original_ext = os.path.splitext(audio.filename or "")[1].lower()
-    if not original_ext:
-        original_ext = ".wav"
-    upload_path = os.path.join(tmp_dir, f"{voice_id}{original_ext}")
-    tmp_path = os.path.join(tmp_dir, f"{voice_id}.wav")
-    data = await audio.read()
-    if not data:
-        raise HTTPException(status_code=400, detail="audio is empty")
-    with open(upload_path, "wb") as f:
-        f.write(data)
-    if original_ext == ".wav":
-        if upload_path != tmp_path:
-            os.replace(upload_path, tmp_path)
-    else:
-        try:
-            seg = AudioSegment.from_file(upload_path)
-            seg = seg.set_channels(1)
-            seg.export(tmp_path, format="wav")
-            os.remove(upload_path)
-        except Exception as exc:
-            raise HTTPException(status_code=400, detail=f"failed to decode audio: {exc}")
+    sample_key = paths["sample"]
+    if not object_exists(sample_key):
+        raise HTTPException(status_code=404, detail=f"sample not found at s3://{sample_key}")
 
     voice_json = {
         "support_id": support_id,
@@ -114,6 +93,7 @@ async def create_profile(
         "status": "queued",
         "ref_text": ref_text,
         "x_vector_only": bool(xvector_only),
+        "sample_key": sample_key,
         "reference_key": paths["reference"],
         "prompt_key": paths["prompt"],
         "created_at": int(time.time()),
@@ -129,7 +109,7 @@ async def create_profile(
             "voice_name": voice_name,
             "ref_text": ref_text,
             "x_vector_only": bool(xvector_only),
-            "local_audio_path": tmp_path,
+            "s3_sample_key": sample_key,
         },
     )
 
@@ -204,6 +184,7 @@ def get_phrase_status(phrase_id: str, support_id: str) -> PhraseStatusResponse:
         phrase_id=phrase_id,
         status=data.get("status", "unknown"),
         result_key=data.get("result_key"),
+        public_url=data.get("public_url"),
         text=data.get("text"),
         voice_id=data.get("voice_id"),
         error=data.get("error"),
@@ -213,11 +194,32 @@ def get_phrase_status(phrase_id: str, support_id: str) -> PhraseStatusResponse:
 @app.get("/admin", response_class=HTMLResponse)
 def admin_dashboard(_: str = Depends(_check_admin)) -> HTMLResponse:
     stats = db.stats()
+    stats_by_type = db.stats_by_type()
     recent = db.list_recent(50)
-    rows = "\n".join(
-        f"<tr><td>{r['id']}</td><td>{r['task_type']}</td><td>{r['status']}</td>"
-        f"<td>{r['attempts']}</td><td>{int(r['updated_at'])}</td></tr>"
-        for r in recent
+    rows = []
+    for r in recent:
+        payload = {}
+        try:
+            payload = json.loads(r.get("payload_json", "{}"))
+        except Exception:
+            payload = {}
+        rows.append(
+            "<tr>"
+            f"<td>{r['id']}</td>"
+            f"<td>{r['task_type']}</td>"
+            f"<td>{r['status']}</td>"
+            f"<td>{r['attempts']}</td>"
+            f"<td>{payload.get('support_id','')}</td>"
+            f"<td>{payload.get('voice_id','')}</td>"
+            f"<td>{payload.get('phrase_id','')}</td>"
+            f"<td>{int(r['updated_at'])}</td>"
+            "</tr>"
+        )
+    rows = "\n".join(rows)
+    by_type_rows = "\n".join(
+        f"<tr><td>{t}</td><td>{v.get('queued',0)}</td><td>{v.get('running',0)}</td>"
+        f"<td>{v.get('done',0)}</td><td>{v.get('failed',0)}</td></tr>"
+        for t, v in stats_by_type.items()
     )
     html = f"""
     <html>
@@ -231,9 +233,14 @@ def admin_dashboard(_: str = Depends(_check_admin)) -> HTMLResponse:
           <li>Done: {stats.get('done', 0)}</li>
           <li>Failed: {stats.get('failed', 0)}</li>
         </ul>
+        <h2>Stats by Task Type</h2>
+        <table border="1" cellpadding="4" cellspacing="0">
+          <tr><th>Type</th><th>Queued</th><th>Running</th><th>Done</th><th>Failed</th></tr>
+          {by_type_rows}
+        </table>
         <h2>Recent Tasks</h2>
         <table border="1" cellpadding="4" cellspacing="0">
-          <tr><th>ID</th><th>Type</th><th>Status</th><th>Attempts</th><th>Updated</th></tr>
+          <tr><th>ID</th><th>Type</th><th>Status</th><th>Attempts</th><th>Support</th><th>Voice</th><th>Phrase</th><th>Updated</th></tr>
           {rows}
         </table>
       </body>

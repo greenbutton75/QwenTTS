@@ -3,6 +3,7 @@ import json
 from typing import Any, Dict
 
 import boto3
+from botocore.exceptions import ClientError
 
 from .config import AWS_ACCESS_KEY_ID, AWS_REGION, AWS_SECRET_ACCESS_KEY, S3_BUCKET_NAME
 
@@ -34,6 +35,17 @@ def download_bytes(key: str) -> bytes:
     return resp["Body"].read()
 
 
+def object_exists(key: str) -> bool:
+    try:
+        _s3.head_object(Bucket=S3_BUCKET_NAME, Key=key)
+        return True
+    except ClientError as exc:
+        code = exc.response.get("Error", {}).get("Code")
+        if code in ("404", "NoSuchKey", "NotFound"):
+            return False
+        raise
+
+
 def write_json(key: str, data: Dict[str, Any]) -> None:
     buf = json.dumps(data, ensure_ascii=False).encode("utf-8")
     upload_bytes(key, buf, "application/json")
@@ -59,3 +71,10 @@ def download_torch(key: str) -> Any:
     bio = io.BytesIO(raw)
     return torch.load(bio, map_location="cpu")
 
+
+def create_presigned_url(key: str, expires_seconds: int) -> str:
+    return _s3.generate_presigned_url(
+        "get_object",
+        Params={"Bucket": S3_BUCKET_NAME, "Key": key},
+        ExpiresIn=expires_seconds,
+    )

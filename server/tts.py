@@ -74,6 +74,14 @@ def load_audio(path: str) -> Tuple[np.ndarray, int]:
         return _normalize_audio(wav), int(sr)
 
 
+def bytes_to_wav_file(data: bytes, suffix: str = ".wav") -> str:
+    tmp = tempfile.NamedTemporaryFile(delete=False, suffix=suffix)
+    tmp.write(data)
+    tmp.flush()
+    tmp.close()
+    return tmp.name
+
+
 def create_voice_prompt(
     ref_audio: Tuple[np.ndarray, int],
     ref_text: Optional[str],
