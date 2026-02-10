@@ -117,13 +117,28 @@ docker run --gpus all --env-file .env -p 8000:8000 qwentts
 
 ### Environment Variables (UI)
 
+Чтобы не упереться в лимит 4096 символов, длинные токены храним в S3.
+В Template оставляем **минимум**:
+
 ```
 AWS_ACCESS_KEY_ID=...
 AWS_SECRET_ACCESS_KEY=...
 AWS_REGION=us-east-1
 S3_BUCKET_NAME=rixtrema-qwentts
-S3_PREFIX=support
+TASK_ENV_S3_KEY=secrets/qwentts.env
+```
 
+Файл `qwentts.env` (лежит в S3) содержит все остальные переменные:
+
+```
+TASK_BASE_URL=https://rixtrema.net/api/async_task_manager
+USER_TOKEN=...
+SYSTEM_TOKEN=...
+FINGERPRINT=...
+
+QWEN_TTS_BASE_URL=http://127.0.0.1:8000
+
+S3_PREFIX=support
 ADMIN_USER=admin
 ADMIN_PASSWORD=YOUR_PASSWORD
 
@@ -138,6 +153,11 @@ LOG_BACKUPS=7
 MAX_RETRIES=3
 RETRY_BASE_SECONDS=30
 
+TASK_WORKER_HEALTH_PORT=8010
+TASK_WORKER_LOG_DIR=/workspace/QwenTTS/logs
+TASK_WORKER_LOG_MAX_BYTES=10485760
+TASK_WORKER_LOG_BACKUPS=7
+
 OPEN_BUTTON_PORT=8000
 ```
 
@@ -151,6 +171,13 @@ mkdir -p /workspace
 
 apt-get update
 apt-get install -y ffmpeg libsndfile1 sox
+pip install awscli
+
+# fetch secrets from S3
+aws s3 cp s3://$S3_BUCKET_NAME/$TASK_ENV_S3_KEY /etc/qwentts.env
+set -a
+source /etc/qwentts.env
+set +a
 
 cd /workspace
 rm -rf QwenTTS
@@ -165,14 +192,12 @@ pip uninstall -y torch torchvision torchaudio transformers accelerate
 pip install torch==2.2.2+cu121 torchvision==0.17.2+cu121 torchaudio==2.2.2+cu121 --index-url https://download.pytorch.org/whl/cu121
 pip install transformers==4.57.3 accelerate==1.12.0
 
+pip install -r task_worker/requirements.txt
+
 mkdir -p logs data tmp
 
-env | grep -E 'AWS_|S3_|ADMIN_|MODEL_|LANGUAGE|SQLITE_PATH|LOG_|MAX_RETRIES|RETRY_BASE_SECONDS|S3_PREFIX|OPEN_BUTTON_PORT' > /etc/qwentts.env
-set -a
-source /etc/qwentts.env
-set +a
-
 nohup uvicorn server.app:app --host 0.0.0.0 --port 8000 > logs/uvicorn.out 2>&1 &
+nohup /venv/main/bin/python -m task_worker.main > logs/task_worker.out 2>&1 &
 ```
 
 ### Проверка

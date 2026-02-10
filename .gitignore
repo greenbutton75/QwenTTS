@@ -29,6 +29,7 @@ data/
 tmp/
 # Local secrets
 .env
+qwentts.env
 
 # Portable runtime artifacts
 portable/cache/

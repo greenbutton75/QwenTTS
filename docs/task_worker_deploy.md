@@ -4,6 +4,18 @@ This guide describes how to deploy `task_worker` on the same GPU instance as Qwe
 
 ## Environment Variables
 
+If your env exceeds Vast limits, store it in S3 and download in Onstart:
+
+```
+AWS_ACCESS_KEY_ID=...
+AWS_SECRET_ACCESS_KEY=...
+AWS_REGION=us-east-1
+S3_BUCKET_NAME=rixtrema-qwentts
+TASK_ENV_S3_KEY=secrets/qwentts.env
+```
+
+The `qwentts.env` file should contain:
+
 ```
 TASK_BASE_URL=https://rixtrema.net/api/async_task_manager
 USER_TOKEN=...
