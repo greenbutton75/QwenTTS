@@ -68,6 +68,7 @@
 
 ```
 s3://rixtrema-qwentts/support/{support_id}/
+  voices/{voice_id}/sample.wav
   voices/{voice_id}/reference.wav
   voices/{voice_id}/voice.json
   voices/{voice_id}/prompt.pt

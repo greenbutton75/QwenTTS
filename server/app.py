@@ -33,6 +33,7 @@ worker = Worker(db, logger)
 def _voice_paths(support_id: str, voice_id: str) -> dict:
     base = f"{S3_PREFIX}/{support_id}/voices/{voice_id}"
     return {
+        "sample": f"{base}/sample.wav",
         "voice_json": f"{base}/voice.json",
         "reference": f"{base}/reference.wav",
         "prompt": f"{base}/prompt.pt",
