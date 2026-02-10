@@ -73,3 +73,13 @@ sudo systemctl status task_worker
 
 The S3 env file must be **LF** and **no spaces around `=`** (e.g. `USER_TOKEN=...`).
 If it was edited on Windows, run: `sed -i 's/\r$//' /etc/qwentts.tokens.env` and `sed -i 's/ *= */=/' /etc/qwentts.tokens.env`.
+
+## Auto-restart (no systemd)
+
+Use the watchdog scripts:
+
+```
+chmod +x /workspace/QwenTTS/scripts/run_api.sh /workspace/QwenTTS/scripts/run_worker.sh
+nohup /workspace/QwenTTS/scripts/run_api.sh > /workspace/QwenTTS/logs/uvicorn.out 2>&1 &
+nohup /workspace/QwenTTS/scripts/run_worker.sh > /workspace/QwenTTS/logs/task_worker.out 2>&1 &
+```

@@ -175,13 +175,12 @@ apt-get install -y ffmpeg libsndfile1 sox
 /venv/main/bin/pip install awscli
 
 # build env file from template + tokens from S3
-env | grep -E 'FINGERPRINT|AWS_|S3_|ADMIN_|MODEL_|LANGUAGE|SQLITE_PATH|LOG_|MAX_RETRIES|RETRY_BASE_SECONDS|S3_PREFIX|OPEN_BUTTON_PORT|TASK_WORKER_|QWEN_TTS_BASE_URL|TASK_BASE_URL|TASK_ENV_S3_KEY' > /etc/qwentts.env
+env | grep -E 'FINGERPRINT|AWS_|S3_|ADMIN_|MODEL_|LANGUAGE|SQLITE_PATH|LOG_|MAX_RETRIES|RETRY_BASE_SECONDS|S3_PREFIX|OPEN_BUTTON_PORT|TASK_WORKER_|QWEN_TTS_BASE_URL|TASK_BASE_URL|TASK_ENV_S3_KEY|QWEN_TTS_HOST|QWEN_TTS_PORT' > /etc/qwentts.env
 set -a
 source /etc/qwentts.env
 set +a
 aws s3 cp s3://$S3_BUCKET_NAME/$TASK_ENV_S3_KEY /etc/qwentts.tokens.env
-sed -i 's/
-$//' /etc/qwentts.tokens.env
+sed -i 's/$//' /etc/qwentts.tokens.env
 sed -i 's/ *= */=/' /etc/qwentts.tokens.env
 cat /etc/qwentts.tokens.env >> /etc/qwentts.env
 set -a
@@ -205,10 +204,12 @@ cd QwenTTS
 /venv/main/bin/pip install -r task_worker/requirements.txt
 
 mkdir -p logs data tmp
+chmod +x /workspace/QwenTTS/scripts/run_api.sh /workspace/QwenTTS/scripts/run_worker.sh
 
-nohup /venv/main/bin/uvicorn server.app:app --host 0.0.0.0 --port 8000 > logs/uvicorn.out 2>&1 &
-nohup /venv/main/bin/python -m task_worker.main > logs/task_worker.out 2>&1 &
+nohup /workspace/QwenTTS/scripts/run_api.sh > logs/uvicorn.out 2>&1 &
+nohup /workspace/QwenTTS/scripts/run_worker.sh > logs/task_worker.out 2>&1 &
 ```
+
 
 
 ### Проверка
