@@ -261,6 +261,11 @@ python -m task_submitter.main create-phrase ^
   --text "Protect and distribute your assets according to your wishes with our comprehensive trust administration services."
 ```
 
+## Docs
+
+- `docs/vastai.md` — Vast.ai deployment + e2e check
+- `docs/task_worker_deploy.md` — task_worker deployment notes
+
 ## Возможности
 
 ### Пресеты голосов

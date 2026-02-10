@@ -94,7 +94,35 @@ http://PublicIP:PORT/admin
 curl http://PublicIP:PORT/health
 ```
 
-## 4) Notes
+## 4) Task Worker (same GPU instance)
+
+Install and run the queue worker:
+
+```
+pip install -r task_worker/requirements.txt
+python -m task_worker.main
+```
+
+The worker reads tasks from async_task_manager and calls the Qwen API on localhost.
+
+## 5) End-to-End Check
+
+1. Upload sample and create profile task (local machine):
+
+```
+pip install -r task_submitter/requirements.txt
+python -m task_submitter.main create-profile --support-id user1_46847 --voice-id voice_21327ef670 --voice-name "Name of Voice 2" --ref-text "Each book in the series was originally published in hardcover format with a number of full-color illustrations spread throughout." --sample "D:\\Work\\ML\\Voice\\Sveta.m4a"
+```
+
+2. Create phrase task:
+
+```
+python -m task_submitter.main create-phrase --support-id user1_46847 --voice-id voice_21327ef670 --phrase-id phrase_006 --text "Protect and distribute your assets according to your wishes with our comprehensive trust administration services."
+```
+
+3. Verify task completion in async_task_manager (status SUCCESS / data contains presigned URL).
+
+## 6) Notes
 
 - Tunnels are optional; direct IP:PORT is preferred for production.
 - If the instance is outbid, just create a new one from the template.
