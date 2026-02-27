@@ -171,6 +171,8 @@ mkdir -p /workspace
 
 apt-get update
 apt-get install -y ffmpeg libsndfile1 sox
+# fix occasional DNS issues on Vast host
+printf "nameserver 1.1.1.1\nnameserver 8.8.8.8\n" > /etc/resolv.conf
 /venv/main/bin/pip install awscli
 
 # build env file from template + tokens from S3
