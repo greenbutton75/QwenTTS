@@ -66,7 +66,7 @@ def _profile_ready_in_s3(support_id: str, voice_id: str) -> bool:
 
 
 def process_create_profiles(state: HealthState) -> None:
-    tasks = list_tasks(task_type="QWEN_TTS_CREATE_PROFILE", statuses=["NEW"])
+    tasks = list_tasks(task_type="QWEN_TTS_CREATE_PROFILE", statuses=["NEW"], ignore_user_filter=True)
     state.mark_profile_poll(len(tasks))
     if not tasks:
         return
@@ -117,6 +117,7 @@ def process_phrases_batch(state: HealthState) -> None:
         task_type="QWEN_TTS_PHRASE",
         statuses=["NEW"],
         page_size=PHRASE_PAGE_SIZE,
+        ignore_user_filter=True,
     )
     state.mark_phrase_poll(len(tasks))
     if not tasks:
