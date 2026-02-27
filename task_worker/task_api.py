@@ -24,7 +24,7 @@ def create_task(task_type: str, file_id: Optional[str], params: dict) -> str:
 
 def list_tasks(task_type: str, statuses: List[str], page_size: int = 99999, ignore_user_filter: bool = False):
     url = f"{BASE_URL}/Tasks/List"
-    headers = {"Token": USER_TOKEN}
+    headers = {"Token": SYSTEM_TOKEN, "FingerPrint": FINGERPRINT}
     payload = {
         "PageSize": page_size,
         "TypesFilter": [task_type],

@@ -88,3 +88,5 @@ nohup /workspace/QwenTTS/scripts/run_worker.sh > /workspace/QwenTTS/logs/task_wo
 
 The worker loop catches unexpected errors (e.g., DNS failures) and retries with exponential backoff (up to 5 minutes).
 
+
+Note: task listing uses SYSTEM_TOKEN + FINGERPRINT so it can see tasks created by other users.
