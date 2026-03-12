@@ -236,11 +236,6 @@ http://PublicIP:PORT/admin
 - `QWEN_TTS_CREATE_PROFILE`
 - `QWEN_TTS_PHRASE`
 
-И создает downstream задачи:
-
-- `QWEN_TTS_READY_PROFILE`
-- `QWEN_TTS_READY_PHRASE`
-
 ### Переменные окружения
 
 ```

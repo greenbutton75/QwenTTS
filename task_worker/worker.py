@@ -8,7 +8,7 @@ from .qwen_client import create_phrase, create_profile, get_phrase_status, get_p
 from .s3_utils import object_exists, read_json
 from .task_api import (
     complete_task,
-    create_task,
+    #create_task,
     failed_task,
     list_tasks,
     task_id_from_record,
@@ -98,11 +98,11 @@ def process_create_profiles(state: HealthState) -> None:
             if result.get("status") == "done":
                 complete_task(task_id, data="done")
                 state.inc_profile_success()
-                create_task(
-                    "QWEN_TTS_READY_PROFILE",
-                    None,
-                    {"support_id": support_id, "voice_id": voice_id},
-                )
+                #create_task(
+                #    "QWEN_TTS_READY_PROFILE",
+                #    None,
+                #    {"support_id": support_id, "voice_id": voice_id},
+                #)
             else:
                 failed_task(task_id, error=result.get("error", "profile failed"))
                 state.inc_profile_failed()
@@ -148,11 +148,11 @@ def process_phrases_batch(state: HealthState) -> None:
                 public_url = result.get("public_url", "")
                 complete_task(task_id, data=public_url)
                 state.inc_phrase_success()
-                create_task(
-                    "QWEN_TTS_READY_PHRASE",
-                    None,
-                    {"support_id": support_id, "voice_id": voice_id, "phrase_id": phrase_id},
-                )
+                #create_task(
+                #    "QWEN_TTS_READY_PHRASE",
+                #    None,
+                #    {"support_id": support_id, "voice_id": voice_id, "phrase_id": phrase_id},
+                #)
             else:
                 failed_task(task_id, error=result.get("error", "phrase failed"))
                 state.inc_phrase_failed()
