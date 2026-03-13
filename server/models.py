@@ -16,6 +16,15 @@ class CreatePhraseRequest(BaseModel):
     text: str
 
 
+class SpliceTestRequest(BaseModel):
+    support_id: str
+    voice_id: str
+    greeting: str
+    body: str
+    pause_ms: int = 180
+    crossfade_ms: int = 20
+
+
 class CreatePhraseResponse(BaseModel):
     phrase_id: str
     status: str

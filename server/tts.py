@@ -1,3 +1,4 @@
+import io
 import tempfile
 from typing import Dict, List, Optional, Tuple
 
@@ -116,3 +117,43 @@ def write_wav_temp(wav: np.ndarray, sr: int) -> str:
     tmp.close()
     sf.write(tmp.name, wav, sr)
     return tmp.name
+
+
+def wav_to_bytes(wav: np.ndarray, sr: int) -> bytes:
+    bio = io.BytesIO()
+    sf.write(bio, wav, sr, format="WAV")
+    return bio.getvalue()
+
+
+def splice_wavs(
+    greeting_wav: np.ndarray,
+    body_wav: np.ndarray,
+    sr: int,
+    pause_ms: int = 180,
+    crossfade_ms: int = 20,
+) -> np.ndarray:
+    pause_ms = max(0, int(pause_ms))
+    crossfade_ms = max(0, int(crossfade_ms))
+    g = _normalize_audio(greeting_wav)
+    b = _normalize_audio(body_wav)
+    pause_samples = int(sr * (pause_ms / 1000.0))
+    silence = np.zeros((pause_samples,), dtype=np.float32)
+    base = np.concatenate([g, silence], axis=0)
+
+    fade_samples = int(sr * (crossfade_ms / 1000.0))
+    fade_samples = max(0, min(fade_samples, base.shape[0], b.shape[0]))
+    if fade_samples == 0:
+        out = np.concatenate([base, b], axis=0)
+    else:
+        fade_out = np.linspace(1.0, 0.0, fade_samples, dtype=np.float32)
+        fade_in = np.linspace(0.0, 1.0, fade_samples, dtype=np.float32)
+        overlap = base[-fade_samples:] * fade_out + b[:fade_samples] * fade_in
+        out = np.concatenate([base[:-fade_samples], overlap, b[fade_samples:]], axis=0)
+
+    if out.size == 0:
+        return out
+
+    peak = np.max(np.abs(out))
+    if peak > 1.0:
+        out = out / peak
+    return out

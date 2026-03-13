@@ -5,8 +5,9 @@ import time
 from typing import Optional
 
 from fastapi import Depends, FastAPI, Form, HTTPException
-from fastapi.responses import HTMLResponse
+from fastapi.responses import HTMLResponse, Response
 from fastapi.security import HTTPBasic, HTTPBasicCredentials
+from qwen_tts import VoiceClonePromptItem
 
 from .config import ADMIN_PASSWORD, ADMIN_USER, S3_PREFIX, SQLITE_PATH
 from .db import TaskDB
@@ -17,8 +18,10 @@ from .models import (
     CreateProfileResponse,
     PhraseStatusResponse,
     ProfileStatusResponse,
+    SpliceTestRequest,
 )
-from .s3_store import object_exists, read_json, write_json
+from .s3_store import download_torch, object_exists, read_json, write_json
+from .tts import generate_voice, splice_wavs, wav_to_bytes
 from .worker import Worker
 
 
@@ -189,6 +192,57 @@ def get_phrase_status(phrase_id: str, support_id: str) -> PhraseStatusResponse:
         text=data.get("text"),
         voice_id=data.get("voice_id"),
         error=data.get("error"),
+    )
+
+
+@app.post("/phrases/splice-test")
+def splice_test_phrase(req: SpliceTestRequest) -> Response:
+    if not req.support_id.strip():
+        raise HTTPException(status_code=400, detail="support_id is required")
+    if not req.voice_id.strip():
+        raise HTTPException(status_code=400, detail="voice_id is required")
+    if not req.greeting.strip():
+        raise HTTPException(status_code=400, detail="greeting is required")
+    if not req.body.strip():
+        raise HTTPException(status_code=400, detail="body is required")
+    if req.pause_ms < 0:
+        raise HTTPException(status_code=400, detail="pause_ms must be >= 0")
+    if req.crossfade_ms < 0:
+        raise HTTPException(status_code=400, detail="crossfade_ms must be >= 0")
+
+    voice_paths = _voice_paths(req.support_id, req.voice_id)
+    if not object_exists(voice_paths["prompt"]):
+        raise HTTPException(status_code=404, detail="voice prompt not found, profile is not ready")
+
+    prompt_data = download_torch(voice_paths["prompt"])
+    voice_prompt = [
+        VoiceClonePromptItem(
+            ref_code=prompt_data["ref_code"],
+            ref_spk_embedding=prompt_data["ref_spk_embedding"],
+            x_vector_only_mode=prompt_data["x_vector_only_mode"],
+            icl_mode=prompt_data["icl_mode"],
+            ref_text=prompt_data.get("ref_text"),
+        )
+    ]
+
+    greeting_wav, sr_greeting = generate_voice(req.greeting, voice_prompt)
+    body_wav, sr_body = generate_voice(req.body, voice_prompt)
+    if int(sr_greeting) != int(sr_body):
+        raise HTTPException(status_code=500, detail="internal error: sample rates mismatch")
+
+    merged_wav = splice_wavs(
+        greeting_wav=greeting_wav,
+        body_wav=body_wav,
+        sr=int(sr_greeting),
+        pause_ms=req.pause_ms,
+        crossfade_ms=req.crossfade_ms,
+    )
+    wav_bytes = wav_to_bytes(merged_wav, int(sr_greeting))
+
+    return Response(
+        content=wav_bytes,
+        media_type="audio/wav",
+        headers={"Content-Disposition": f'inline; filename="{req.voice_id}_splice_test.wav"'},
     )
 
 
