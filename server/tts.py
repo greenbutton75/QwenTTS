@@ -125,6 +125,12 @@ def wav_to_bytes(wav: np.ndarray, sr: int) -> bytes:
     return bio.getvalue()
 
 
+def wav_from_bytes(data: bytes) -> Tuple[np.ndarray, int]:
+    bio = io.BytesIO(data)
+    wav, sr = sf.read(bio, always_2d=False)
+    return _normalize_audio(wav), int(sr)
+
+
 def splice_wavs(
     greeting_wav: np.ndarray,
     body_wav: np.ndarray,

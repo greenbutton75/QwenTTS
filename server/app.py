@@ -1,5 +1,6 @@
 import json
 import os
+import hashlib
 import threading
 import time
 from typing import Optional
@@ -9,7 +10,7 @@ from fastapi.responses import HTMLResponse, Response
 from fastapi.security import HTTPBasic, HTTPBasicCredentials
 from qwen_tts import VoiceClonePromptItem
 
-from .config import ADMIN_PASSWORD, ADMIN_USER, S3_PREFIX, SQLITE_PATH
+from .config import ADMIN_PASSWORD, ADMIN_USER, LANGUAGE, MODEL_SIZE, S3_PREFIX, SQLITE_PATH
 from .db import TaskDB
 from .logging_setup import setup_logging
 from .models import (
@@ -20,8 +21,8 @@ from .models import (
     ProfileStatusResponse,
     SpliceTestRequest,
 )
-from .s3_store import download_torch, object_exists, read_json, write_json
-from .tts import generate_voice, splice_wavs, wav_to_bytes
+from .s3_store import download_bytes, download_torch, object_exists, read_json, upload_bytes, write_json
+from .tts import generate_voice, splice_wavs, wav_from_bytes, wav_to_bytes
 from .worker import Worker
 
 
@@ -49,6 +50,39 @@ def _phrase_paths(support_id: str, phrase_id: str) -> dict:
         "phrase_json": f"{base}.json",
         "audio": f"{base}.wav",
     }
+
+
+def _body_cache_paths(support_id: str, voice_id: str, cache_hash: str) -> dict:
+    base = f"{S3_PREFIX}/{support_id}/voices/{voice_id}/splice_cache"
+    return {
+        "audio": f"{base}/body_{cache_hash}.wav",
+        "meta": f"{base}/body_{cache_hash}.json",
+    }
+
+
+def _body_cache_hash(
+    support_id: str,
+    voice_id: str,
+    body: str,
+    prompt_data: dict,
+) -> str:
+    payload = {
+        "support_id": support_id,
+        "voice_id": voice_id,
+        "body": body.strip(),
+        "model_params": {
+            "model_size": MODEL_SIZE,
+            "language": LANGUAGE,
+            "engine": "qwen3_tts_generate_voice_clone_defaults",
+        },
+        "prompt_meta": {
+            "x_vector_only_mode": bool(prompt_data.get("x_vector_only_mode", False)),
+            "icl_mode": bool(prompt_data.get("icl_mode", False)),
+            "ref_text": prompt_data.get("ref_text") or "",
+        },
+    }
+    raw = json.dumps(payload, ensure_ascii=False, sort_keys=True).encode("utf-8")
+    return hashlib.sha256(raw).hexdigest()
 
 
 def _check_admin(credentials: HTTPBasicCredentials = Depends(security)) -> str:
@@ -226,9 +260,42 @@ def splice_test_phrase(req: SpliceTestRequest) -> Response:
     ]
 
     greeting_wav, sr_greeting = generate_voice(req.greeting, voice_prompt)
-    body_wav, sr_body = generate_voice(req.body, voice_prompt)
+    body_hash = _body_cache_hash(req.support_id, req.voice_id, req.body, prompt_data)
+    cache_paths = _body_cache_paths(req.support_id, req.voice_id, body_hash)
+
+    body_wav = None
+    sr_body = None
+    body_cache_hit = object_exists(cache_paths["audio"])
+    if body_cache_hit:
+        try:
+            body_wav, sr_body = wav_from_bytes(download_bytes(cache_paths["audio"]))
+        except Exception:
+            body_cache_hit = False
+
+    if not body_cache_hit:
+        body_wav, sr_body = generate_voice(req.body, voice_prompt)
+        body_bytes = wav_to_bytes(body_wav, int(sr_body))
+        upload_bytes(cache_paths["audio"], body_bytes, "audio/wav")
+        write_json(
+            cache_paths["meta"],
+            {
+                "support_id": req.support_id,
+                "voice_id": req.voice_id,
+                "body_hash": body_hash,
+                "body_text": req.body,
+                "model_size": MODEL_SIZE,
+                "language": LANGUAGE,
+                "created_at": int(time.time()),
+            },
+        )
+
     if int(sr_greeting) != int(sr_body):
-        raise HTTPException(status_code=500, detail="internal error: sample rates mismatch")
+        # Defensive fallback if cached body from a stale model/config slips through.
+        body_wav, sr_body = generate_voice(req.body, voice_prompt)
+        body_bytes = wav_to_bytes(body_wav, int(sr_body))
+        upload_bytes(cache_paths["audio"], body_bytes, "audio/wav")
+        if int(sr_greeting) != int(sr_body):
+            raise HTTPException(status_code=500, detail="internal error: sample rates mismatch")
 
     merged_wav = splice_wavs(
         greeting_wav=greeting_wav,
@@ -242,7 +309,11 @@ def splice_test_phrase(req: SpliceTestRequest) -> Response:
     return Response(
         content=wav_bytes,
         media_type="audio/wav",
-        headers={"Content-Disposition": f'inline; filename="{req.voice_id}_splice_test.wav"'},
+        headers={
+            "Content-Disposition": f'inline; filename="{req.voice_id}_splice_test.wav"',
+            "X-Body-Cache": "hit" if body_cache_hit else "miss",
+            "X-Body-Cache-Key": body_hash,
+        },
     )
 
 
