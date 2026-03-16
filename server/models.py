@@ -1,4 +1,4 @@
-from typing import Optional
+from typing import Literal, Optional
 
 from pydantic import BaseModel
 
@@ -23,6 +23,9 @@ class SpliceTestRequest(BaseModel):
     body: str
     pause_ms: int = 180
     crossfade_ms: int = 20
+    content_aware: bool = True
+    target_lufs: float = -16.0
+    mode: Literal["wav_splice", "latent_concat"] = "wav_splice"
 
 
 class CreatePhraseResponse(BaseModel):

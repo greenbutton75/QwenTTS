@@ -36,6 +36,11 @@ def main() -> None:
     parser.add_argument("--body", required=True)
     parser.add_argument("--pause-ms", type=int, default=120)
     parser.add_argument("--crossfade-ms", type=int, default=10)
+    parser.add_argument("--mode", choices=["wav_splice", "latent_concat"], default="wav_splice")
+    parser.add_argument("--target-lufs", type=float, default=-16.0)
+    parser.add_argument("--content-aware", dest="content_aware", action="store_true")
+    parser.add_argument("--no-content-aware", dest="content_aware", action="store_false")
+    parser.set_defaults(content_aware=True)
     parser.add_argument("--out-dir", default="splice-tests")
     parser.add_argument("--greetings-file", default="", help="Optional text file: one greeting per line.")
     parser.add_argument("--timeout-sec", type=int, default=900)
@@ -62,6 +67,9 @@ def main() -> None:
             "body": args.body,
             "pause_ms": args.pause_ms,
             "crossfade_ms": args.crossfade_ms,
+            "content_aware": bool(args.content_aware),
+            "target_lufs": float(args.target_lufs),
+            "mode": args.mode,
         }
 
         safe_name = "".join(ch if ch.isalnum() else "_" for ch in greeting).strip("_").lower()
@@ -80,7 +88,12 @@ def main() -> None:
                         f.write(chunk)
             cache = resp.headers.get("X-Body-Cache", "unknown")
             cache_key = resp.headers.get("X-Body-Cache-Key", "")
-            print(f"[{idx}/{len(greetings)}] saved={out_path} cache={cache} key={cache_key[:12]}")
+            mode = resp.headers.get("X-Mode", "?")
+            strategy = resp.headers.get("X-Splice-Strategy", "?")
+            print(
+                f"[{idx}/{len(greetings)}] saved={out_path} "
+                f"cache={cache} key={cache_key[:12]} mode={mode} strategy={strategy}"
+            )
 
 
 if __name__ == "__main__":

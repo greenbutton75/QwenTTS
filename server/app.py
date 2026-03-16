@@ -22,7 +22,7 @@ from .models import (
     SpliceTestRequest,
 )
 from .s3_store import download_bytes, download_torch, object_exists, read_json, upload_bytes, write_json
-from .tts import generate_voice, splice_wavs, wav_from_bytes, wav_to_bytes
+from .tts import generate_voice, splice_speech_segments, wav_from_bytes, wav_to_bytes
 from .worker import Worker
 
 
@@ -243,6 +243,21 @@ def splice_test_phrase(req: SpliceTestRequest) -> Response:
         raise HTTPException(status_code=400, detail="pause_ms must be >= 0")
     if req.crossfade_ms < 0:
         raise HTTPException(status_code=400, detail="crossfade_ms must be >= 0")
+    if req.mode not in ("wav_splice", "latent_concat"):
+        raise HTTPException(status_code=400, detail="mode must be 'wav_splice' or 'latent_concat'")
+
+    if req.mode == "latent_concat":
+        enabled = os.getenv("ENABLE_EXPERIMENTAL_LATENT_CONCAT", "false").strip().lower() in (
+            "1",
+            "true",
+            "yes",
+        )
+        if not enabled:
+            raise HTTPException(
+                status_code=400,
+                detail="latent_concat is disabled. Set ENABLE_EXPERIMENTAL_LATENT_CONCAT=true to enable experiments.",
+            )
+        raise HTTPException(status_code=501, detail="latent_concat experimental path is not implemented yet")
 
     voice_paths = _voice_paths(req.support_id, req.voice_id)
     if not object_exists(voice_paths["prompt"]):
@@ -297,12 +312,15 @@ def splice_test_phrase(req: SpliceTestRequest) -> Response:
         if int(sr_greeting) != int(sr_body):
             raise HTTPException(status_code=500, detail="internal error: sample rates mismatch")
 
-    merged_wav = splice_wavs(
+    splice_strategy = "content_aware" if req.content_aware else "simple"
+    merged_wav = splice_speech_segments(
         greeting_wav=greeting_wav,
         body_wav=body_wav,
-        sr=int(sr_greeting),
+        sample_rate=int(sr_greeting),
         pause_ms=req.pause_ms,
         crossfade_ms=req.crossfade_ms,
+        content_aware=req.content_aware,
+        target_lufs=req.target_lufs,
     )
     wav_bytes = wav_to_bytes(merged_wav, int(sr_greeting))
 
@@ -313,6 +331,9 @@ def splice_test_phrase(req: SpliceTestRequest) -> Response:
             "Content-Disposition": f'inline; filename="{req.voice_id}_splice_test.wav"',
             "X-Body-Cache": "hit" if body_cache_hit else "miss",
             "X-Body-Cache-Key": body_hash,
+            "X-Mode": req.mode,
+            "X-Splice-Strategy": splice_strategy,
+            "X-Target-Lufs": f"{req.target_lufs:.2f}",
         },
     )
 
