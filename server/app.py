@@ -3,6 +3,7 @@ import os
 import hashlib
 import threading
 import time
+import urllib.request
 from typing import Optional
 
 from fastapi import Depends, FastAPI, Form, HTTPException
@@ -17,11 +18,20 @@ from .models import (
     CreatePhraseRequest,
     CreatePhraseResponse,
     CreateProfileResponse,
+    CreateSplicePhraseRequest,
     PhraseStatusResponse,
     ProfileStatusResponse,
     SpliceTestRequest,
 )
-from .s3_store import download_bytes, download_torch, object_exists, read_json, upload_bytes, write_json
+from .s3_store import (
+    create_presigned_url,
+    download_bytes,
+    download_torch,
+    object_exists,
+    read_json,
+    upload_bytes,
+    write_json,
+)
 from .tts import generate_voice, splice_speech_segments, wav_from_bytes, wav_to_bytes
 from .worker import Worker
 
@@ -85,10 +95,114 @@ def _body_cache_hash(
     return hashlib.sha256(raw).hexdigest()
 
 
+def _load_voice_prompt(support_id: str, voice_id: str):
+    voice_paths = _voice_paths(support_id, voice_id)
+    if not object_exists(voice_paths["prompt"]):
+        raise HTTPException(status_code=404, detail="voice prompt not found, profile is not ready")
+    prompt_data = download_torch(voice_paths["prompt"])
+    voice_prompt = [
+        VoiceClonePromptItem(
+            ref_code=prompt_data["ref_code"],
+            ref_spk_embedding=prompt_data["ref_spk_embedding"],
+            x_vector_only_mode=prompt_data["x_vector_only_mode"],
+            icl_mode=prompt_data["icl_mode"],
+            ref_text=prompt_data.get("ref_text"),
+        )
+    ]
+    return prompt_data, voice_prompt
+
+
+def _load_or_generate_body_wav(
+    support_id: str,
+    voice_id: str,
+    body: str,
+    prompt_data: dict,
+    voice_prompt,
+):
+    body_hash = _body_cache_hash(support_id, voice_id, body, prompt_data)
+    cache_paths = _body_cache_paths(support_id, voice_id, body_hash)
+    body_cache_hit = object_exists(cache_paths["audio"])
+    body_wav = None
+    sr_body = None
+    if body_cache_hit:
+        try:
+            body_wav, sr_body = wav_from_bytes(download_bytes(cache_paths["audio"]))
+        except Exception:
+            body_cache_hit = False
+
+    if not body_cache_hit:
+        body_wav, sr_body = generate_voice(body, voice_prompt)
+        body_bytes = wav_to_bytes(body_wav, int(sr_body))
+        upload_bytes(cache_paths["audio"], body_bytes, "audio/wav")
+        write_json(
+            cache_paths["meta"],
+            {
+                "support_id": support_id,
+                "voice_id": voice_id,
+                "body_hash": body_hash,
+                "body_text": body,
+                "model_size": MODEL_SIZE,
+                "language": LANGUAGE,
+                "created_at": int(time.time()),
+            },
+        )
+    return body_wav, int(sr_body), body_hash, body_cache_hit
+
+
+def _synthesize_spliced_phrase(
+    support_id: str,
+    voice_id: str,
+    greeting: str,
+    body: str,
+    pause_ms: int,
+    crossfade_ms: int,
+    content_aware: bool,
+    target_lufs: float,
+):
+    prompt_data, voice_prompt = _load_voice_prompt(support_id, voice_id)
+    greeting_wav, sr_greeting = generate_voice(greeting, voice_prompt)
+    body_wav, sr_body, body_hash, body_cache_hit = _load_or_generate_body_wav(
+        support_id=support_id,
+        voice_id=voice_id,
+        body=body,
+        prompt_data=prompt_data,
+        voice_prompt=voice_prompt,
+    )
+    if int(sr_greeting) != int(sr_body):
+        body_wav, sr_body = generate_voice(body, voice_prompt)
+        body_bytes = wav_to_bytes(body_wav, int(sr_body))
+        cache_paths = _body_cache_paths(support_id, voice_id, body_hash)
+        upload_bytes(cache_paths["audio"], body_bytes, "audio/wav")
+        if int(sr_greeting) != int(sr_body):
+            raise HTTPException(status_code=500, detail="internal error: sample rates mismatch")
+
+    splice_strategy = "content_aware" if content_aware else "simple"
+    merged_wav = splice_speech_segments(
+        greeting_wav=greeting_wav,
+        body_wav=body_wav,
+        sample_rate=int(sr_greeting),
+        pause_ms=pause_ms,
+        crossfade_ms=crossfade_ms,
+        content_aware=content_aware,
+        target_lufs=target_lufs,
+    )
+    return wav_to_bytes(merged_wav, int(sr_greeting)), body_hash, body_cache_hit, splice_strategy
+
+
 def _check_admin(credentials: HTTPBasicCredentials = Depends(security)) -> str:
     if credentials.username != ADMIN_USER or credentials.password != ADMIN_PASSWORD:
         raise HTTPException(status_code=401, detail="Unauthorized")
     return credentials.username
+
+
+def _fetch_task_worker_health() -> dict:
+    url = os.getenv("TASK_WORKER_HEALTH_URL", "http://127.0.0.1:8010/health")
+    try:
+        with urllib.request.urlopen(url, timeout=2) as resp:
+            raw = resp.read().decode("utf-8")
+            return json.loads(raw)
+    except Exception:
+        return {}
 
 
 @app.on_event("startup")
@@ -259,70 +373,16 @@ def splice_test_phrase(req: SpliceTestRequest) -> Response:
             )
         raise HTTPException(status_code=501, detail="latent_concat experimental path is not implemented yet")
 
-    voice_paths = _voice_paths(req.support_id, req.voice_id)
-    if not object_exists(voice_paths["prompt"]):
-        raise HTTPException(status_code=404, detail="voice prompt not found, profile is not ready")
-
-    prompt_data = download_torch(voice_paths["prompt"])
-    voice_prompt = [
-        VoiceClonePromptItem(
-            ref_code=prompt_data["ref_code"],
-            ref_spk_embedding=prompt_data["ref_spk_embedding"],
-            x_vector_only_mode=prompt_data["x_vector_only_mode"],
-            icl_mode=prompt_data["icl_mode"],
-            ref_text=prompt_data.get("ref_text"),
-        )
-    ]
-
-    greeting_wav, sr_greeting = generate_voice(req.greeting, voice_prompt)
-    body_hash = _body_cache_hash(req.support_id, req.voice_id, req.body, prompt_data)
-    cache_paths = _body_cache_paths(req.support_id, req.voice_id, body_hash)
-
-    body_wav = None
-    sr_body = None
-    body_cache_hit = object_exists(cache_paths["audio"])
-    if body_cache_hit:
-        try:
-            body_wav, sr_body = wav_from_bytes(download_bytes(cache_paths["audio"]))
-        except Exception:
-            body_cache_hit = False
-
-    if not body_cache_hit:
-        body_wav, sr_body = generate_voice(req.body, voice_prompt)
-        body_bytes = wav_to_bytes(body_wav, int(sr_body))
-        upload_bytes(cache_paths["audio"], body_bytes, "audio/wav")
-        write_json(
-            cache_paths["meta"],
-            {
-                "support_id": req.support_id,
-                "voice_id": req.voice_id,
-                "body_hash": body_hash,
-                "body_text": req.body,
-                "model_size": MODEL_SIZE,
-                "language": LANGUAGE,
-                "created_at": int(time.time()),
-            },
-        )
-
-    if int(sr_greeting) != int(sr_body):
-        # Defensive fallback if cached body from a stale model/config slips through.
-        body_wav, sr_body = generate_voice(req.body, voice_prompt)
-        body_bytes = wav_to_bytes(body_wav, int(sr_body))
-        upload_bytes(cache_paths["audio"], body_bytes, "audio/wav")
-        if int(sr_greeting) != int(sr_body):
-            raise HTTPException(status_code=500, detail="internal error: sample rates mismatch")
-
-    splice_strategy = "content_aware" if req.content_aware else "simple"
-    merged_wav = splice_speech_segments(
-        greeting_wav=greeting_wav,
-        body_wav=body_wav,
-        sample_rate=int(sr_greeting),
+    wav_bytes, body_hash, body_cache_hit, splice_strategy = _synthesize_spliced_phrase(
+        support_id=req.support_id,
+        voice_id=req.voice_id,
+        greeting=req.greeting,
+        body=req.body,
         pause_ms=req.pause_ms,
         crossfade_ms=req.crossfade_ms,
         content_aware=req.content_aware,
         target_lufs=req.target_lufs,
     )
-    wav_bytes = wav_to_bytes(merged_wav, int(sr_greeting))
 
     return Response(
         content=wav_bytes,
@@ -338,11 +398,91 @@ def splice_test_phrase(req: SpliceTestRequest) -> Response:
     )
 
 
+@app.post("/phrases/splice-prod", response_model=CreatePhraseResponse)
+def create_phrase_splice_prod(req: CreateSplicePhraseRequest) -> CreatePhraseResponse:
+    if not req.support_id.strip():
+        raise HTTPException(status_code=400, detail="support_id is required")
+    if not req.voice_id.strip():
+        raise HTTPException(status_code=400, detail="voice_id is required")
+    if not req.phrase_id.strip():
+        raise HTTPException(status_code=400, detail="phrase_id is required")
+    if not req.greeting.strip():
+        raise HTTPException(status_code=400, detail="greeting is required")
+    if not req.body.strip():
+        raise HTTPException(status_code=400, detail="body is required")
+    if req.pause_ms < 0:
+        raise HTTPException(status_code=400, detail="pause_ms must be >= 0")
+    if req.crossfade_ms < 0:
+        raise HTTPException(status_code=400, detail="crossfade_ms must be >= 0")
+
+    paths = _phrase_paths(req.support_id, req.phrase_id)
+    write_json(
+        paths["phrase_json"],
+        {
+            "support_id": req.support_id,
+            "voice_id": req.voice_id,
+            "phrase_id": req.phrase_id,
+            "text": f"{req.greeting} {req.body}".strip(),
+            "status": "processing",
+            "result_key": paths["audio"],
+            "created_at": int(time.time()),
+            "updated_at": int(time.time()),
+        },
+    )
+
+    try:
+        wav_bytes, _, body_cache_hit, splice_strategy = _synthesize_spliced_phrase(
+            support_id=req.support_id,
+            voice_id=req.voice_id,
+            greeting=req.greeting,
+            body=req.body,
+            pause_ms=req.pause_ms,
+            crossfade_ms=req.crossfade_ms,
+            content_aware=req.content_aware,
+            target_lufs=req.target_lufs,
+        )
+        upload_bytes(paths["audio"], wav_bytes, "audio/wav")
+        public_url = create_presigned_url(paths["audio"], expires_seconds=60 * 24 * 3600)
+        write_json(
+            paths["phrase_json"],
+            {
+                "support_id": req.support_id,
+                "voice_id": req.voice_id,
+                "phrase_id": req.phrase_id,
+                "text": f"{req.greeting} {req.body}".strip(),
+                "status": "done",
+                "result_key": paths["audio"],
+                "public_url": public_url,
+                "splice_strategy": splice_strategy,
+                "body_cache": "hit" if body_cache_hit else "miss",
+                "updated_at": int(time.time()),
+            },
+        )
+    except Exception as exc:
+        write_json(
+            paths["phrase_json"],
+            {
+                "support_id": req.support_id,
+                "voice_id": req.voice_id,
+                "phrase_id": req.phrase_id,
+                "text": f"{req.greeting} {req.body}".strip(),
+                "status": "failed",
+                "result_key": paths["audio"],
+                "error": str(exc),
+                "updated_at": int(time.time()),
+            },
+        )
+        raise
+
+    return CreatePhraseResponse(phrase_id=req.phrase_id, status="done")
+
+
 @app.get("/admin", response_class=HTMLResponse)
 def admin_dashboard(_: str = Depends(_check_admin)) -> HTMLResponse:
     stats = db.stats()
     stats_by_type = db.stats_by_type()
     recent = db.list_recent(50)
+    worker_health = _fetch_task_worker_health()
     rows = []
     for r in recent:
         payload = {}
@@ -380,6 +520,14 @@ def admin_dashboard(_: str = Depends(_check_admin)) -> HTMLResponse:
           <li>Done: {stats.get('done', 0)}</li>
           <li>Failed: {stats.get('failed', 0)}</li>
         </ul>
+        <h2>Task Worker Phrase Metrics</h2>
+        <table border="1" cellpadding="4" cellspacing="0">
+          <tr><th>Metric</th><th>Value</th></tr>
+          <tr><td>phrase_grouped</td><td>{worker_health.get('phrase_grouped', 0)}</td></tr>
+          <tr><td>phrase_splice_path</td><td>{worker_health.get('phrase_splice_path', 0)}</td></tr>
+          <tr><td>phrase_fallback_full</td><td>{worker_health.get('phrase_fallback_full', 0)}</td></tr>
+          <tr><td>splice_failures</td><td>{worker_health.get('splice_failures', 0)}</td></tr>
+        </table>
         <h2>Stats by Task Type</h2>
         <table border="1" cellpadding="4" cellspacing="0">
           <tr><th>Type</th><th>Queued</th><th>Running</th><th>Done</th><th>Failed</th></tr>

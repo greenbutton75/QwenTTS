@@ -17,6 +17,10 @@ class HealthState:
         self.phrase_seen = 0
         self.phrase_success = 0
         self.phrase_failed = 0
+        self.phrase_grouped = 0
+        self.phrase_splice_path = 0
+        self.phrase_fallback_full = 0
+        self.splice_failures = 0
         self.last_error = ""
 
     def snapshot(self) -> Dict[str, object]:
@@ -31,6 +35,10 @@ class HealthState:
                 "phrase_seen": self.phrase_seen,
                 "phrase_success": self.phrase_success,
                 "phrase_failed": self.phrase_failed,
+                "phrase_grouped": self.phrase_grouped,
+                "phrase_splice_path": self.phrase_splice_path,
+                "phrase_fallback_full": self.phrase_fallback_full,
+                "splice_failures": self.splice_failures,
                 "last_error": self.last_error,
             }
 
@@ -59,6 +67,22 @@ class HealthState:
     def inc_phrase_failed(self) -> None:
         with self._lock:
             self.phrase_failed += 1
+
+    def inc_phrase_grouped(self, count: int = 1) -> None:
+        with self._lock:
+            self.phrase_grouped += int(count)
+
+    def inc_phrase_splice_path(self, count: int = 1) -> None:
+        with self._lock:
+            self.phrase_splice_path += int(count)
+
+    def inc_phrase_fallback_full(self, count: int = 1) -> None:
+        with self._lock:
+            self.phrase_fallback_full += int(count)
+
+    def inc_splice_failure(self, count: int = 1) -> None:
+        with self._lock:
+            self.splice_failures += int(count)
 
     def set_error(self, msg: str) -> None:
         with self._lock:

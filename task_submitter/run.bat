@@ -1,0 +1,1 @@
+﻿py splice_batch_generate.py --base-url "http://108.179.129.245:57489" --support-id "63180" --voice-id "ab196dbb-3ef0-4ee4-ae15-1c4701b203c4" --body "This is Alex, Director of Customer Support from Rixtrema." --pause-ms 120 --crossfade-ms 30 --out-dir "splice-tests"

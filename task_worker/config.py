@@ -27,6 +27,14 @@ PHRASE_PAGE_SIZE = int(os.getenv("PHRASE_PAGE_SIZE", "50"))
 MAX_WAIT_SECONDS = int(os.getenv("MAX_WAIT_SECONDS", "1800"))
 
 STAGE_PROCESSING = os.getenv("STAGE_PROCESSING", "PROCESSING")
+ENABLE_PHRASE_SPLICE_GROUPING = os.getenv("ENABLE_PHRASE_SPLICE_GROUPING", "false").strip().lower() in (
+    "1",
+    "true",
+    "yes",
+)
+PHRASE_SPLICE_SUPPORT_IDS = {
+    x.strip() for x in os.getenv("PHRASE_SPLICE_SUPPORT_IDS", "").split(",") if x.strip()
+}
 
 HEALTH_PORT = int(os.getenv("TASK_WORKER_HEALTH_PORT", "8010"))
 
