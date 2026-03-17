@@ -9,7 +9,6 @@ from .config import (
     MAX_WAIT_SECONDS,
     PHRASE_PAGE_SIZE,
     PHRASE_POLL_INTERVAL,
-    PHRASE_SPLICE_SUPPORT_IDS,
     PROFILE_POLL_INTERVAL,
     STAGE_PROCESSING,
 )
@@ -101,11 +100,8 @@ def _split_greeting_body(text: str) -> Optional[Tuple[str, str]]:
 
 
 def _use_splice_grouping_for_support(support_id: str) -> bool:
-    if not ENABLE_PHRASE_SPLICE_GROUPING:
-        return False
-    if not PHRASE_SPLICE_SUPPORT_IDS:
-        return True
-    return support_id in PHRASE_SPLICE_SUPPORT_IDS
+    _ = support_id
+    return ENABLE_PHRASE_SPLICE_GROUPING
 
 
 def _submit_and_wait_full_phrase(

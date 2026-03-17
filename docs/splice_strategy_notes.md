@@ -171,7 +171,6 @@ python task_submitter/splice_batch_generate.py \
 
 - Worker-side группировка задач:
   - Включается env-флагом `ENABLE_PHRASE_SPLICE_GROUPING`
-  - Опциональный allowlist: `PHRASE_SPLICE_SUPPORT_IDS=63180,....`
   - Группировка только внутри текущего батча `QWEN_TTS_PHRASE`
   - Ключ группы: `(support_id, voice_id, normalized_body)`
   - `split` консервативный: фразы, начинающиеся с `Hi|Hello <Name>...`
