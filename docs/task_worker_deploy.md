@@ -69,6 +69,23 @@ sudo systemctl status task_worker
 - Profiles and phrases are checked in S3, so the instance can be interrupted safely.
 - Batch size for phrase tasks: 50 (no new fetch until batch finishes).
 
+### Phrase splice optimization (production)
+
+`QWEN_TTS_PHRASE` now has an internal optimization path:
+
+- Worker groups similar phrase tasks inside one poll batch.
+- If multiple tasks share the same normalized body, worker calls server splice endpoint.
+- Server generates greeting + cached body and merges with content-aware splice.
+- If task is unique or split fails, worker falls back to the old full-phrase path.
+
+No mandatory new env variables are required.
+
+Optional flag:
+
+```
+ENABLE_PHRASE_SPLICE_GROUPING=true   # default true
+```
+
 ## Token File Format
 
 The S3 env file must be **LF** and **no spaces around `=`** (e.g. `USER_TOKEN=...`).

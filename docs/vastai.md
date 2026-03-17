@@ -175,3 +175,27 @@ python -m task_submitter.main create-phrase --support-id user1_46847 --voice-id 
 - Tunnels are optional; direct IP:PORT is preferred for production.
 - If the instance is outbid, just create a new one from the template.
 - All outputs and statuses are in S3, not on the instance disk.
+
+## 7) Phrase splice optimization (2026-03-13)
+
+Production now includes greeting/body splice optimization for phrase tasks:
+
+- Worker may use splice path for repeated scripts in the same batch.
+- Content-aware audio splice is used by default.
+- Fallback to full-phrase generation remains in place for safety.
+
+No additional required env vars for this feature.
+
+Optional kill switch:
+
+```
+ENABLE_PHRASE_SPLICE_GROUPING=false
+```
+
+Verification:
+
+- API admin page (`/admin`) now shows:
+  - `phrase_grouped`
+  - `phrase_splice_path`
+  - `phrase_fallback_full`
+  - `splice_failures`

@@ -1,4 +1,4 @@
-﻿#Описание работы 
+# Описание работы
 
 ## Создание профиля
 Имеет AWS креды для записи mp3 образцов голоса в бакет rixtrema-qwentts/support/{user_id}/voices/{voice_id}/
@@ -19,9 +19,9 @@
 
 
 
-#Конкретные вызовы
+# Конкретные вызовы
 
-##Создание профиля голоса
+## Создание профиля голоса
 
 python -m task_submitter.main create-profile `
   --support-id user1_46847 `
@@ -30,7 +30,7 @@ python -m task_submitter.main create-profile `
   --ref-text "Each book in the series was originally published in hardcover format with a number of full-color illustrations spread throughout." `
   --sample "D:\Work\ML\Voice\Sveta.m4a"
 
-##Создание фразы
+## Создание фразы
 python -m task_submitter.main create-phrase `
   --support-id user1_46847 `
   --voice-id voice_2 `
@@ -48,10 +48,21 @@ Id	FileId	Created	Type	TaskParameters	Completed	Status	Progress	Stage	Data
 
 
 
-#Мониторинг
+# Мониторинг
 Эти IP и порты - для текущего запуска инстанса.
 http://24.124.32.70:57990/health (API health)
 http://24.124.32.70:57990/admin
 http://24.124.32.70:57643/health (task_worker health)
 
 http://admin:jzexxxxxxxxxxxxxxx@24.124.32.70:57990/admin
+
+## Update (2026-03-13)
+
+Для `QWEN_TTS_PHRASE` в проде включена оптимизация:
+
+- если в батче есть несколько похожих фраз с общим body, worker использует splice-путь;
+- body переиспользуется из S3 cache, greeting синтезируется отдельно;
+- склейка выполняется через content-aware алгоритм;
+- если фраза уникальна или split невалиден, используется старый full-phrase путь.
+
+Для `task_submitter` ничего менять не нужно: `create-phrase` API остаётся прежним.

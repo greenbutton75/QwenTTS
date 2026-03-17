@@ -170,7 +170,7 @@ python task_submitter/splice_batch_generate.py \
   - Обновляет `phrase_json` со статусом `done/failed`
 
 - Worker-side группировка задач:
-  - Включается env-флагом `ENABLE_PHRASE_SPLICE_GROUPING`
+  - Включается env-флагом `ENABLE_PHRASE_SPLICE_GROUPING` (default `true`)
   - Группировка только внутри текущего батча `QWEN_TTS_PHRASE`
   - Ключ группы: `(support_id, voice_id, normalized_body)`
   - `split` консервативный: фразы, начинающиеся с `Hi|Hello <Name>...`
@@ -186,3 +186,22 @@ python task_submitter/splice_batch_generate.py \
   - `phrase_splice_path`
   - `phrase_fallback_full`
   - `splice_failures`
+
+## Today summary (2026-03-13)
+
+Что сделано:
+
+- Тестовый splice endpoint расширен (`content_aware`, `target_lufs`, режимы).
+- Добавлен прод endpoint `POST /phrases/splice-prod`.
+- В worker добавлена группировка `QWEN_TTS_PHRASE` внутри текущего батча:
+  - split `greeting/body` консервативным regex,
+  - строгий матч по normalized body,
+  - splice-path только для групп `>=2`,
+  - fallback на full-phrase при ошибках/одиночных задачах.
+- Добавлены health-метрики воркера:
+  - `phrase_grouped`,
+  - `phrase_splice_path`,
+  - `phrase_fallback_full`,
+  - `splice_failures`.
+- Метрики выведены в API админке `/admin`.
+- `ENABLE_PHRASE_SPLICE_GROUPING` сделан включенным по умолчанию.

@@ -311,6 +311,25 @@ python -m task_submitter.main create-phrase ^
 
 - `docs/vastai.md` — Vast.ai deployment + e2e check
 - `docs/task_worker_deploy.md` — task_worker deployment notes
+- `docs/splice_strategy_notes.md` — greeting/body splice strategy, cache, rollout
+
+## Update (2026-03-13)
+
+В прод-пайплайн добавлена оптимизация для `QWEN_TTS_PHRASE`:
+
+- Новый серверный endpoint: `POST /phrases/splice-prod`
+- Worker-группировка фраз внутри текущего батча по `(support_id, voice_id, normalized_body)`
+- Для групп `>=2`: синтез `greeting + cached body` с `content_aware` склейкой
+- Для одиночных/сомнительных случаев: fallback на старый full-phrase путь (`POST /phrases`)
+- S3 cache body: `support/{support_id}/voices/{voice_id}/splice_cache/body_<hash>.wav`
+- Метрики в worker health: `phrase_grouped`, `phrase_splice_path`, `phrase_fallback_full`, `splice_failures`
+- Эти метрики отображаются в `/admin` (порт API)
+
+Важно:
+
+- Дополнительные env для этой функции не обязательны.
+- `ENABLE_PHRASE_SPLICE_GROUPING` по умолчанию `true`.
+- Для принудительного отключения: `ENABLE_PHRASE_SPLICE_GROUPING=false`.
 
 ## Возможности
 

@@ -1,5 +1,15 @@
-﻿
+
 # Python API documentation for http://127.0.0.1:7860/
+
+## Repo update note (2026-03-13)
+
+Этот файл описывает Gradio UI API и не покрывает server/task_worker прод-контур.  
+Ключевые изменения по прод-сервису и splice-оптимизации описаны в:
+
+- `README.md`
+- `docs/splice_strategy_notes.md`
+- `docs/task_worker_deploy.md`
+- `docs/vastai.md`
 API Endpoints: 17
 
 1. Install the Python client [docs](https://www.gradio.app/guides/getting-started-with-the-python-client) if you don't already have it installed. 
