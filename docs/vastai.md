@@ -110,6 +110,8 @@ cd QwenTTS
 
 /venv/main/bin/pip install -r task_worker/requirements.txt
 
+/venv/main/bin/pip install --no-cache-dir setuptools==75.8.0 
+
 mkdir -p logs data tmp
 chmod +x /workspace/QwenTTS/scripts/run_api.sh /workspace/QwenTTS/scripts/run_worker.sh
 

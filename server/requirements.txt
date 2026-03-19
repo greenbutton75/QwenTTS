@@ -8,6 +8,7 @@ numpy==1.26.4
 einops==0.7.0
 onnxruntime==1.17.3
 librosa==0.10.1
+setuptools==75.8.0
 sox==1.4.1
 huggingface_hub==0.34.0
 safetensors==0.4.3
