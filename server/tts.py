@@ -1,18 +1,20 @@
 import io
 import tempfile
-from typing import Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
+import librosa
 import numpy as np
 import soundfile as sf
 from pydub import AudioSegment
 
 from qwen_tts import Qwen3TTSModel, VoiceClonePromptItem
 
-from .config import LANGUAGE, MODEL_SIZE, voice_clone_generate_config
+from .config import MODEL_SIZE, LANGUAGE, greeting_similarity_retry_generate_config, voice_clone_generate_config
 
 
 _MODEL_CACHE: Dict[str, Qwen3TTSModel] = {}
 _VOICE_CLONE_GENERATE_CONFIG = voice_clone_generate_config()
+_GREETING_RETRY_GENERATE_CONFIG = greeting_similarity_retry_generate_config()
 
 
 def _get_device() -> str:
@@ -100,18 +102,81 @@ def create_voice_prompt(
     return items[0]
 
 
+def _effective_generate_config(overrides: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+    config = dict(_VOICE_CLONE_GENERATE_CONFIG)
+    if overrides:
+        config.update(overrides)
+    return config
+
+
 def generate_voice(
     text: str,
     voice_prompt: List[VoiceClonePromptItem],
+    generate_config: Optional[Dict[str, Any]] = None,
 ) -> Tuple[np.ndarray, int]:
     tts = _get_model()
     wavs, sr = tts.generate_voice_clone(
         text=text,
         language=LANGUAGE,
         voice_clone_prompt=voice_prompt,
-        **_VOICE_CLONE_GENERATE_CONFIG,
+        **_effective_generate_config(generate_config),
     )
     return wavs[0], sr
+
+
+def _embedding_to_numpy(embedding: Any) -> np.ndarray:
+    try:
+        import torch
+
+        if torch.is_tensor(embedding):
+            return embedding.detach().cpu().float().numpy().reshape(-1)
+    except Exception:
+        pass
+    return np.asarray(embedding, dtype=np.float32).reshape(-1)
+
+
+def extract_speaker_embedding(audio: np.ndarray, sr: int):
+    tts = _get_model()
+    wav = _normalize_audio(audio)
+    target_sr = int(tts.model.speaker_encoder_sample_rate)
+    if int(sr) != target_sr:
+        wav = librosa.resample(y=wav.astype(np.float32), orig_sr=int(sr), target_sr=target_sr)
+    return tts.model.extract_speaker_embedding(audio=wav, sr=target_sr)
+
+
+def speaker_similarity(audio: np.ndarray, sr: int, reference_embedding: Any) -> float:
+    generated = _embedding_to_numpy(extract_speaker_embedding(audio, sr))
+    reference = _embedding_to_numpy(reference_embedding)
+    denom = float(np.linalg.norm(generated) * np.linalg.norm(reference))
+    if denom <= 1e-12:
+        return 0.0
+    return float(np.dot(generated, reference) / denom)
+
+
+def generate_voice_with_similarity_retry(
+    text: str,
+    voice_prompt: List[VoiceClonePromptItem],
+    reference_embedding: Any,
+    min_similarity: float,
+    max_attempts: int,
+) -> Tuple[np.ndarray, int, float, int, bool]:
+    total_attempts = max(1, int(max_attempts))
+    best_wav = None
+    best_sr = 0
+    best_similarity = float("-inf")
+
+    for attempt in range(1, total_attempts + 1):
+        generate_config = None if attempt == 1 else dict(_GREETING_RETRY_GENERATE_CONFIG)
+        wav, sr = generate_voice(text, voice_prompt, generate_config=generate_config)
+        similarity = speaker_similarity(wav, sr, reference_embedding)
+        if similarity > best_similarity or best_wav is None:
+            best_wav = wav
+            best_sr = sr
+            best_similarity = similarity
+        if similarity >= float(min_similarity):
+            return wav, sr, similarity, attempt, True
+
+    return best_wav, best_sr, best_similarity, total_attempts, False
 
 
 def write_wav_temp(wav: np.ndarray, sr: int) -> str:

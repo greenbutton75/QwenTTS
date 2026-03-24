@@ -59,6 +59,10 @@ def _install_test_stubs() -> None:
     fake_tts.bytes_to_wav_file = lambda data, suffix=".wav": "tmp.wav"
     fake_tts.create_voice_prompt = lambda ref_audio, ref_text, x_vector_only: None
     fake_tts.generate_voice = lambda text, voice_prompt: (np.zeros(8, dtype=np.float32), 24000)
+    fake_tts.generate_voice_with_similarity_retry = (
+        lambda text, voice_prompt, reference_embedding, min_similarity, max_attempts:
+        (np.zeros(8, dtype=np.float32), 24000, 0.99, 1, True)
+    )
     fake_tts.load_audio = lambda path: (np.zeros(8, dtype=np.float32), 24000)
     fake_tts.write_wav_temp = lambda wav, sr: "tmp.wav"
     fake_tts.splice_speech_segments = lambda **kwargs: np.zeros(8, dtype=np.float32)

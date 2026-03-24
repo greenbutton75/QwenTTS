@@ -36,6 +36,10 @@ def _install_qwen_stub() -> None:
     fake_soundfile.write = lambda *args, **kwargs: None
     sys.modules["soundfile"] = fake_soundfile
 
+    fake_librosa = types.ModuleType("librosa")
+    fake_librosa.resample = lambda y, orig_sr, target_sr: y
+    sys.modules["librosa"] = fake_librosa
+
     fake_pydub = types.ModuleType("pydub")
 
     class FakeAudioSegment:
@@ -89,6 +93,45 @@ class ServerGenerationStabilityTests(unittest.TestCase):
         self.assertNotIn("temperature", model.kwargs)
         self.assertNotIn("top_k", model.kwargs)
         self.assertNotIn("top_p", model.kwargs)
+
+    def test_similarity_retry_accepts_second_attempt(self) -> None:
+        wav = np.zeros(8, dtype=np.float32)
+        with patch.object(server_tts, "generate_voice", side_effect=[(wav, 24000), (wav, 24000)]) as generate_mock, \
+             patch.object(server_tts, "speaker_similarity", side_effect=[0.21, 0.81]):
+            out_wav, sr, similarity, attempts, passed = server_tts.generate_voice_with_similarity_retry(
+                text="Hi, Kevin,",
+                voice_prompt=["prompt"],
+                reference_embedding=np.array([0.1, 0.2], dtype=np.float32),
+                min_similarity=0.55,
+                max_attempts=3,
+            )
+
+        self.assertIs(out_wav, wav)
+        self.assertEqual(sr, 24000)
+        self.assertAlmostEqual(similarity, 0.81, places=6)
+        self.assertEqual(attempts, 2)
+        self.assertTrue(passed)
+        self.assertEqual(generate_mock.call_count, 2)
+
+    def test_similarity_retry_returns_best_attempt_when_threshold_not_met(self) -> None:
+        wav1 = np.ones(8, dtype=np.float32)
+        wav2 = np.full(8, 2.0, dtype=np.float32)
+        wav3 = np.full(8, 3.0, dtype=np.float32)
+        with patch.object(server_tts, "generate_voice", side_effect=[(wav1, 24000), (wav2, 24000), (wav3, 24000)]), \
+             patch.object(server_tts, "speaker_similarity", side_effect=[0.20, 0.48, 0.35]):
+            out_wav, sr, similarity, attempts, passed = server_tts.generate_voice_with_similarity_retry(
+                text="Hi, Kevin,",
+                voice_prompt=["prompt"],
+                reference_embedding=np.array([0.1, 0.2], dtype=np.float32),
+                min_similarity=0.55,
+                max_attempts=3,
+            )
+
+        self.assertIs(out_wav, wav2)
+        self.assertEqual(sr, 24000)
+        self.assertAlmostEqual(similarity, 0.48, places=6)
+        self.assertEqual(attempts, 3)
+        self.assertFalse(passed)
 
 
 if __name__ == "__main__":

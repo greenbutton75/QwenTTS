@@ -12,6 +12,12 @@ from qwen_tts import VoiceClonePromptItem
 
 from .config import ADMIN_PASSWORD, ADMIN_USER, LANGUAGE, MODEL_SIZE, S3_PREFIX, SQLITE_PATH
 from .config import voice_clone_generate_config
+from .config import (
+    GREETING_SPEAKER_SIMILARITY_CHECK,
+    GREETING_SPEAKER_SIMILARITY_MAX_ATTEMPTS,
+    GREETING_SPEAKER_SIMILARITY_REQUIRE_PASS,
+    GREETING_SPEAKER_SIMILARITY_THRESHOLD,
+)
 from .cache_utils import body_cache_hash, prompt_fingerprint
 from .db import TaskDB
 from .logging_setup import setup_logging
@@ -33,7 +39,13 @@ from .s3_store import (
     upload_bytes,
     write_json,
 )
-from .tts import generate_voice, splice_speech_segments, wav_from_bytes, wav_to_bytes
+from .tts import (
+    generate_voice,
+    generate_voice_with_similarity_retry,
+    splice_speech_segments,
+    wav_from_bytes,
+    wav_to_bytes,
+)
 from .worker import Worker
 
 
@@ -158,7 +170,29 @@ def _synthesize_spliced_phrase(
     target_lufs: float,
 ):
     prompt_data, voice_prompt = _load_voice_prompt(support_id, voice_id)
-    greeting_wav, sr_greeting = generate_voice(greeting, voice_prompt)
+    greeting_similarity = None
+    greeting_attempts = 1
+    greeting_similarity_passed = None
+    if GREETING_SPEAKER_SIMILARITY_CHECK:
+        greeting_wav, sr_greeting, greeting_similarity, greeting_attempts, greeting_similarity_passed = (
+            generate_voice_with_similarity_retry(
+                text=greeting,
+                voice_prompt=voice_prompt,
+                reference_embedding=prompt_data["ref_spk_embedding"],
+                min_similarity=GREETING_SPEAKER_SIMILARITY_THRESHOLD,
+                max_attempts=GREETING_SPEAKER_SIMILARITY_MAX_ATTEMPTS,
+            )
+        )
+        if GREETING_SPEAKER_SIMILARITY_REQUIRE_PASS and not greeting_similarity_passed:
+            raise HTTPException(
+                status_code=422,
+                detail=(
+                    "greeting speaker similarity below threshold: "
+                    f"{greeting_similarity:.4f} < {GREETING_SPEAKER_SIMILARITY_THRESHOLD:.4f}"
+                ),
+            )
+    else:
+        greeting_wav, sr_greeting = generate_voice(greeting, voice_prompt)
     body_wav, sr_body, body_hash, body_cache_hit = _load_or_generate_body_wav(
         support_id=support_id,
         voice_id=voice_id,
@@ -184,7 +218,15 @@ def _synthesize_spliced_phrase(
         content_aware=content_aware,
         target_lufs=target_lufs,
     )
-    return wav_to_bytes(merged_wav, int(sr_greeting)), body_hash, body_cache_hit, splice_strategy
+    return (
+        wav_to_bytes(merged_wav, int(sr_greeting)),
+        body_hash,
+        body_cache_hit,
+        splice_strategy,
+        greeting_similarity,
+        greeting_attempts,
+        greeting_similarity_passed,
+    )
 
 
 def _check_admin(credentials: HTTPBasicCredentials = Depends(security)) -> str:
@@ -371,7 +413,15 @@ def splice_test_phrase(req: SpliceTestRequest) -> Response:
             )
         raise HTTPException(status_code=501, detail="latent_concat experimental path is not implemented yet")
 
-    wav_bytes, body_hash, body_cache_hit, splice_strategy = _synthesize_spliced_phrase(
+    (
+        wav_bytes,
+        body_hash,
+        body_cache_hit,
+        splice_strategy,
+        greeting_similarity,
+        greeting_attempts,
+        greeting_similarity_passed,
+    ) = _synthesize_spliced_phrase(
         support_id=req.support_id,
         voice_id=req.voice_id,
         greeting=req.greeting,
@@ -392,6 +442,9 @@ def splice_test_phrase(req: SpliceTestRequest) -> Response:
             "X-Mode": req.mode,
             "X-Splice-Strategy": splice_strategy,
             "X-Target-Lufs": f"{req.target_lufs:.2f}",
+            "X-Greeting-Similarity": "" if greeting_similarity is None else f"{greeting_similarity:.4f}",
+            "X-Greeting-Attempts": str(greeting_attempts),
+            "X-Greeting-Similarity-Passed": "" if greeting_similarity_passed is None else str(bool(greeting_similarity_passed)).lower(),
         },
     )
 
@@ -429,7 +482,15 @@ def create_phrase_splice_prod(req: CreateSplicePhraseRequest) -> CreatePhraseRes
     )
 
     try:
-        wav_bytes, _, body_cache_hit, splice_strategy = _synthesize_spliced_phrase(
+        (
+            wav_bytes,
+            _,
+            body_cache_hit,
+            splice_strategy,
+            greeting_similarity,
+            greeting_attempts,
+            greeting_similarity_passed,
+        ) = _synthesize_spliced_phrase(
             support_id=req.support_id,
             voice_id=req.voice_id,
             greeting=req.greeting,
@@ -453,6 +514,9 @@ def create_phrase_splice_prod(req: CreateSplicePhraseRequest) -> CreatePhraseRes
                 "public_url": public_url,
                 "splice_strategy": splice_strategy,
                 "body_cache": "hit" if body_cache_hit else "miss",
+                "greeting_similarity": greeting_similarity,
+                "greeting_attempts": greeting_attempts,
+                "greeting_similarity_passed": greeting_similarity_passed,
                 "updated_at": int(time.time()),
             },
         )
