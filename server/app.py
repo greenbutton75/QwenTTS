@@ -11,6 +11,7 @@ from fastapi.security import HTTPBasic, HTTPBasicCredentials
 from qwen_tts import VoiceClonePromptItem
 
 from .config import ADMIN_PASSWORD, ADMIN_USER, LANGUAGE, MODEL_SIZE, S3_PREFIX, SQLITE_PATH
+from .config import voice_clone_generate_config
 from .cache_utils import body_cache_hash, prompt_fingerprint
 from .db import TaskDB
 from .logging_setup import setup_logging
@@ -42,6 +43,7 @@ app = FastAPI(title="QwenTTS VVK API", version="1.0.0")
 security = HTTPBasic()
 db = TaskDB(SQLITE_PATH)
 worker = Worker(db, logger)
+VOICE_CLONE_GENERATE_CONFIG = voice_clone_generate_config()
 
 
 def _voice_paths(support_id: str, voice_id: str) -> dict:
@@ -84,6 +86,7 @@ def _body_cache_hash(
         model_size=MODEL_SIZE,
         language=LANGUAGE,
         prompt_data=prompt_data,
+        generation_config=VOICE_CLONE_GENERATE_CONFIG,
     )
 
 
@@ -137,6 +140,7 @@ def _load_or_generate_body_wav(
                 "prompt_fingerprint": prompt_digest,
                 "model_size": MODEL_SIZE,
                 "language": LANGUAGE,
+                "generation_config": dict(VOICE_CLONE_GENERATE_CONFIG),
                 "created_at": int(time.time()),
             },
         )

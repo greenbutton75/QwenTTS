@@ -1,6 +1,6 @@
 import hashlib
 import json
-from typing import Any, Mapping
+from typing import Any, Mapping, Optional
 
 import numpy as np
 
@@ -76,6 +76,7 @@ def body_cache_hash(
     model_size: str,
     language: str,
     prompt_data: Mapping[str, Any],
+    generation_config: Optional[Mapping[str, Any]] = None,
     engine: str = "qwen3_tts_generate_voice_clone_defaults",
 ) -> str:
     payload = {
@@ -87,6 +88,7 @@ def body_cache_hash(
             "language": language,
             "engine": engine,
         },
+        "generation_config": dict(generation_config or {}),
         "prompt_fingerprint": prompt_fingerprint(prompt_data),
         "prompt_meta": {
             "x_vector_only_mode": bool(prompt_data.get("x_vector_only_mode", False)),

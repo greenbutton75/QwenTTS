@@ -112,6 +112,35 @@ class ServerCacheLogicTests(unittest.TestCase):
 
         self.assertNotEqual(hash_a, hash_b)
 
+    def test_body_cache_hash_changes_when_generation_config_changes(self) -> None:
+        prompt = {
+            "ref_code": np.array([[1, 2, 3]], dtype=np.int16),
+            "ref_spk_embedding": np.array([0.1, 0.2], dtype=np.float32),
+            "x_vector_only_mode": False,
+            "icl_mode": True,
+            "ref_text": "sample one",
+        }
+        greedy_hash = body_cache_hash(
+            "support-1",
+            "voice-1",
+            "Shared body",
+            "1.7B",
+            "English",
+            prompt,
+            generation_config={"do_sample": False, "non_streaming_mode": True},
+        )
+        sampled_hash = body_cache_hash(
+            "support-1",
+            "voice-1",
+            "Shared body",
+            "1.7B",
+            "English",
+            prompt,
+            generation_config={"do_sample": True, "temperature": 0.9},
+        )
+
+        self.assertNotEqual(greedy_hash, sampled_hash)
+
     def test_profile_refresh_clears_splice_cache_and_records_prompt_fingerprint(self) -> None:
         worker = server_worker.Worker(db=MagicMock(), logger=MagicMock())
         prompt_item = SimpleNamespace(

@@ -8,10 +8,11 @@ from pydub import AudioSegment
 
 from qwen_tts import Qwen3TTSModel, VoiceClonePromptItem
 
-from .config import LANGUAGE, MODEL_SIZE
+from .config import LANGUAGE, MODEL_SIZE, voice_clone_generate_config
 
 
 _MODEL_CACHE: Dict[str, Qwen3TTSModel] = {}
+_VOICE_CLONE_GENERATE_CONFIG = voice_clone_generate_config()
 
 
 def _get_device() -> str:
@@ -108,6 +109,7 @@ def generate_voice(
         text=text,
         language=LANGUAGE,
         voice_clone_prompt=voice_prompt,
+        **_VOICE_CLONE_GENERATE_CONFIG,
     )
     return wavs[0], sr
 
