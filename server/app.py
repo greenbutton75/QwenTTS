@@ -1,6 +1,5 @@
 import json
 import os
-import hashlib
 import threading
 import time
 import urllib.request
@@ -12,6 +11,7 @@ from fastapi.security import HTTPBasic, HTTPBasicCredentials
 from qwen_tts import VoiceClonePromptItem
 
 from .config import ADMIN_PASSWORD, ADMIN_USER, LANGUAGE, MODEL_SIZE, S3_PREFIX, SQLITE_PATH
+from .cache_utils import body_cache_hash, prompt_fingerprint
 from .db import TaskDB
 from .logging_setup import setup_logging
 from .models import (
@@ -51,6 +51,7 @@ def _voice_paths(support_id: str, voice_id: str) -> dict:
         "voice_json": f"{base}/voice.json",
         "reference": f"{base}/reference.wav",
         "prompt": f"{base}/prompt.pt",
+        "splice_cache_prefix": f"{base}/splice_cache/",
     }
 
 
@@ -76,23 +77,14 @@ def _body_cache_hash(
     body: str,
     prompt_data: dict,
 ) -> str:
-    payload = {
-        "support_id": support_id,
-        "voice_id": voice_id,
-        "body": body.strip(),
-        "model_params": {
-            "model_size": MODEL_SIZE,
-            "language": LANGUAGE,
-            "engine": "qwen3_tts_generate_voice_clone_defaults",
-        },
-        "prompt_meta": {
-            "x_vector_only_mode": bool(prompt_data.get("x_vector_only_mode", False)),
-            "icl_mode": bool(prompt_data.get("icl_mode", False)),
-            "ref_text": prompt_data.get("ref_text") or "",
-        },
-    }
-    raw = json.dumps(payload, ensure_ascii=False, sort_keys=True).encode("utf-8")
-    return hashlib.sha256(raw).hexdigest()
+    return body_cache_hash(
+        support_id=support_id,
+        voice_id=voice_id,
+        body=body,
+        model_size=MODEL_SIZE,
+        language=LANGUAGE,
+        prompt_data=prompt_data,
+    )
 
 
 def _load_voice_prompt(support_id: str, voice_id: str):
@@ -119,6 +111,7 @@ def _load_or_generate_body_wav(
     prompt_data: dict,
     voice_prompt,
 ):
+    prompt_digest = prompt_fingerprint(prompt_data)
     body_hash = _body_cache_hash(support_id, voice_id, body, prompt_data)
     cache_paths = _body_cache_paths(support_id, voice_id, body_hash)
     body_cache_hit = object_exists(cache_paths["audio"])
@@ -141,6 +134,7 @@ def _load_or_generate_body_wav(
                 "voice_id": voice_id,
                 "body_hash": body_hash,
                 "body_text": body,
+                "prompt_fingerprint": prompt_digest,
                 "model_size": MODEL_SIZE,
                 "language": LANGUAGE,
                 "created_at": int(time.time()),

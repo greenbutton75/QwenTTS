@@ -3,12 +3,14 @@ import time
 import traceback
 from typing import Any, Dict
 
+from .cache_utils import prompt_fingerprint
 from .config import MAX_RETRIES, RETRY_BASE_SECONDS, S3_PREFIX
 from .db import TaskDB
 from qwen_tts import VoiceClonePromptItem
 
 from .s3_store import (
     create_presigned_url,
+    delete_prefix,
     download_bytes,
     download_torch,
     upload_file,
@@ -25,6 +27,7 @@ def _voice_paths(support_id: str, voice_id: str) -> Dict[str, str]:
         "voice_json": f"{base}/voice.json",
         "prompt": f"{base}/prompt.pt",
         "sample": f"{base}/sample.wav",
+        "splice_cache_prefix": f"{base}/splice_cache/",
     }
 
 
@@ -89,18 +92,18 @@ class Worker:
         sample_path = bytes_to_wav_file(sample_bytes, suffix=".wav")
         wav, sr = load_audio(sample_path)
         prompt_item = create_voice_prompt((wav, sr), ref_text, x_vector_only)
+        prompt_payload = {
+            "ref_code": prompt_item.ref_code,
+            "ref_spk_embedding": prompt_item.ref_spk_embedding,
+            "x_vector_only_mode": prompt_item.x_vector_only_mode,
+            "icl_mode": prompt_item.icl_mode,
+            "ref_text": prompt_item.ref_text,
+        }
+        prompt_digest = prompt_fingerprint(prompt_payload)
 
+        delete_prefix(paths["splice_cache_prefix"])
         upload_file(paths["reference"], sample_path, "audio/wav")
-        upload_torch(
-            paths["prompt"],
-            {
-                "ref_code": prompt_item.ref_code,
-                "ref_spk_embedding": prompt_item.ref_spk_embedding,
-                "x_vector_only_mode": prompt_item.x_vector_only_mode,
-                "icl_mode": prompt_item.icl_mode,
-                "ref_text": prompt_item.ref_text,
-            },
-        )
+        upload_torch(paths["prompt"], prompt_payload)
 
         voice_json = {
             "support_id": support_id,
@@ -111,6 +114,7 @@ class Worker:
             "x_vector_only": x_vector_only,
             "reference_key": paths["reference"],
             "prompt_key": paths["prompt"],
+            "prompt_fingerprint": prompt_digest,
             "updated_at": int(time.time()),
         }
         write_json(paths["voice_json"], voice_json)

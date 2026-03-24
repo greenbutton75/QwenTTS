@@ -72,6 +72,33 @@ def download_torch(key: str) -> Any:
     return torch.load(bio, map_location="cpu")
 
 
+def delete_prefix(prefix: str) -> int:
+    deleted = 0
+    continuation_token = None
+    while True:
+        kwargs = {
+            "Bucket": S3_BUCKET_NAME,
+            "Prefix": prefix,
+            "MaxKeys": 1000,
+        }
+        if continuation_token:
+            kwargs["ContinuationToken"] = continuation_token
+
+        resp = _s3.list_objects_v2(**kwargs)
+        contents = resp.get("Contents", [])
+        if contents:
+            objects = [{"Key": item["Key"]} for item in contents]
+            _s3.delete_objects(
+                Bucket=S3_BUCKET_NAME,
+                Delete={"Objects": objects, "Quiet": True},
+            )
+            deleted += len(objects)
+
+        if not resp.get("IsTruncated"):
+            return deleted
+        continuation_token = resp.get("NextContinuationToken")
+
+
 def create_presigned_url(key: str, expires_seconds: int) -> str:
     return _s3.generate_presigned_url(
         "get_object",

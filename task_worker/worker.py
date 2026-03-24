@@ -27,7 +27,10 @@ from .task_api import (
 
 
 logger = logging.getLogger("task_worker")
-GREETING_RE = re.compile(r"^\s*(hi|hello)\s+([a-zA-Z][a-zA-Z'\-]*)\s*([!,]?)\s*", re.IGNORECASE)
+GREETING_RE = re.compile(
+    r"^\s*(hi|hello)(?:\s+[!,]?\s*|[!,]\s*)([a-zA-Z][a-zA-Z'\-]*)\s*([!,]?)\s*",
+    re.IGNORECASE,
+)
 
 
 def _sample_key(support_id: str, voice_id: str) -> str:
