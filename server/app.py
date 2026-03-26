@@ -17,6 +17,7 @@ from .config import (
     GREETING_SPEAKER_SIMILARITY_MAX_ATTEMPTS,
     GREETING_SPEAKER_SIMILARITY_REQUIRE_PASS,
     GREETING_SPEAKER_SIMILARITY_THRESHOLD,
+    output_audio_trim_config,
 )
 from .cache_utils import body_cache_hash, prompt_fingerprint
 from .db import TaskDB
@@ -40,6 +41,7 @@ from .s3_store import (
     write_json,
 )
 from .tts import (
+    clean_output_audio,
     generate_voice,
     generate_voice_with_similarity_retry,
     splice_speech_segments,
@@ -56,6 +58,7 @@ security = HTTPBasic()
 db = TaskDB(SQLITE_PATH)
 worker = Worker(db, logger)
 VOICE_CLONE_GENERATE_CONFIG = voice_clone_generate_config()
+OUTPUT_AUDIO_TRIM_CONFIG = output_audio_trim_config()
 
 
 def _voice_paths(support_id: str, voice_id: str) -> dict:
@@ -98,7 +101,10 @@ def _body_cache_hash(
         model_size=MODEL_SIZE,
         language=LANGUAGE,
         prompt_data=prompt_data,
-        generation_config=VOICE_CLONE_GENERATE_CONFIG,
+        generation_config={
+            "voice_clone": dict(VOICE_CLONE_GENERATE_CONFIG),
+            "output_trim": dict(OUTPUT_AUDIO_TRIM_CONFIG),
+        },
     )
 
 
@@ -140,6 +146,7 @@ def _load_or_generate_body_wav(
 
     if not body_cache_hit:
         body_wav, sr_body = generate_voice(body, voice_prompt)
+        body_wav, sr_body, body_trim = clean_output_audio(body_wav, sr_body)
         body_bytes = wav_to_bytes(body_wav, int(sr_body))
         upload_bytes(cache_paths["audio"], body_bytes, "audio/wav")
         write_json(
@@ -153,6 +160,7 @@ def _load_or_generate_body_wav(
                 "model_size": MODEL_SIZE,
                 "language": LANGUAGE,
                 "generation_config": dict(VOICE_CLONE_GENERATE_CONFIG),
+                "output_trim": body_trim,
                 "created_at": int(time.time()),
             },
         )
@@ -202,9 +210,25 @@ def _synthesize_spliced_phrase(
     )
     if int(sr_greeting) != int(sr_body):
         body_wav, sr_body = generate_voice(body, voice_prompt)
+        body_wav, sr_body, body_trim = clean_output_audio(body_wav, sr_body)
         body_bytes = wav_to_bytes(body_wav, int(sr_body))
         cache_paths = _body_cache_paths(support_id, voice_id, body_hash)
         upload_bytes(cache_paths["audio"], body_bytes, "audio/wav")
+        write_json(
+            cache_paths["meta"],
+            {
+                "support_id": support_id,
+                "voice_id": voice_id,
+                "body_hash": body_hash,
+                "body_text": body,
+                "prompt_fingerprint": prompt_digest,
+                "model_size": MODEL_SIZE,
+                "language": LANGUAGE,
+                "generation_config": dict(VOICE_CLONE_GENERATE_CONFIG),
+                "output_trim": body_trim,
+                "created_at": int(time.time()),
+            },
+        )
         if int(sr_greeting) != int(sr_body):
             raise HTTPException(status_code=500, detail="internal error: sample rates mismatch")
 
@@ -218,14 +242,16 @@ def _synthesize_spliced_phrase(
         content_aware=content_aware,
         target_lufs=target_lufs,
     )
+    merged_wav, merged_sr, output_trim = clean_output_audio(merged_wav, int(sr_greeting))
     return (
-        wav_to_bytes(merged_wav, int(sr_greeting)),
+        wav_to_bytes(merged_wav, int(merged_sr)),
         body_hash,
         body_cache_hit,
         splice_strategy,
         greeting_similarity,
         greeting_attempts,
         greeting_similarity_passed,
+        output_trim,
     )
 
 
@@ -421,6 +447,7 @@ def splice_test_phrase(req: SpliceTestRequest) -> Response:
         greeting_similarity,
         greeting_attempts,
         greeting_similarity_passed,
+        output_trim,
     ) = _synthesize_spliced_phrase(
         support_id=req.support_id,
         voice_id=req.voice_id,
@@ -445,6 +472,9 @@ def splice_test_phrase(req: SpliceTestRequest) -> Response:
             "X-Greeting-Similarity": "" if greeting_similarity is None else f"{greeting_similarity:.4f}",
             "X-Greeting-Attempts": str(greeting_attempts),
             "X-Greeting-Similarity-Passed": "" if greeting_similarity_passed is None else str(bool(greeting_similarity_passed)).lower(),
+            "X-Output-Trim-Leading-Ms": str(output_trim["leading_ms"]),
+            "X-Output-Trim-Trailing-Ms": str(output_trim["trailing_ms"]),
+            "X-Output-Trim-Applied": str(bool(output_trim["trimmed"])).lower(),
         },
     )
 
@@ -490,6 +520,7 @@ def create_phrase_splice_prod(req: CreateSplicePhraseRequest) -> CreatePhraseRes
             greeting_similarity,
             greeting_attempts,
             greeting_similarity_passed,
+            output_trim,
         ) = _synthesize_spliced_phrase(
             support_id=req.support_id,
             voice_id=req.voice_id,
@@ -517,6 +548,7 @@ def create_phrase_splice_prod(req: CreateSplicePhraseRequest) -> CreatePhraseRes
                 "greeting_similarity": greeting_similarity,
                 "greeting_attempts": greeting_attempts,
                 "greeting_similarity_passed": greeting_similarity_passed,
+                "output_trim": output_trim,
                 "updated_at": int(time.time()),
             },
         )

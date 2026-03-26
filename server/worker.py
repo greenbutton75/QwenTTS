@@ -17,7 +17,15 @@ from .s3_store import (
     upload_torch,
     write_json,
 )
-from .tts import bytes_to_wav_file, create_voice_prompt, generate_voice, load_audio, write_wav_temp
+from .tts import (
+    bytes_to_wav_file,
+    clean_output_audio,
+    clean_reference_audio,
+    create_voice_prompt,
+    generate_voice,
+    load_audio,
+    write_wav_temp,
+)
 
 
 def _voice_paths(support_id: str, voice_id: str) -> Dict[str, str]:
@@ -91,7 +99,8 @@ class Worker:
         sample_bytes = download_bytes(s3_sample_key)
         sample_path = bytes_to_wav_file(sample_bytes, suffix=".wav")
         wav, sr = load_audio(sample_path)
-        prompt_item = create_voice_prompt((wav, sr), ref_text, x_vector_only)
+        cleaned_wav, cleaned_sr, reference_trim = clean_reference_audio(wav, sr)
+        prompt_item = create_voice_prompt((cleaned_wav, cleaned_sr), ref_text, x_vector_only)
         prompt_payload = {
             "ref_code": prompt_item.ref_code,
             "ref_spk_embedding": prompt_item.ref_spk_embedding,
@@ -100,9 +109,10 @@ class Worker:
             "ref_text": prompt_item.ref_text,
         }
         prompt_digest = prompt_fingerprint(prompt_payload)
+        reference_path = write_wav_temp(cleaned_wav, cleaned_sr)
 
         delete_prefix(paths["splice_cache_prefix"])
-        upload_file(paths["reference"], sample_path, "audio/wav")
+        upload_file(paths["reference"], reference_path, "audio/wav")
         upload_torch(paths["prompt"], prompt_payload)
 
         voice_json = {
@@ -115,14 +125,16 @@ class Worker:
             "reference_key": paths["reference"],
             "prompt_key": paths["prompt"],
             "prompt_fingerprint": prompt_digest,
+            "reference_trim": reference_trim,
             "updated_at": int(time.time()),
         }
         write_json(paths["voice_json"], voice_json)
 
-        try:
-            os.remove(sample_path)
-        except Exception:
-            pass
+        for path in (sample_path, reference_path):
+            try:
+                os.remove(path)
+            except Exception:
+                pass
 
     def _handle_phrase(self, payload: Dict[str, Any]) -> None:
         support_id = payload["support_id"]
@@ -145,6 +157,7 @@ class Worker:
         ]
 
         wav, sr = generate_voice(text, voice_prompt)
+        wav, sr, output_trim = clean_output_audio(wav, sr)
         tmp_path = write_wav_temp(wav, sr)
         upload_file(phrase_paths["audio"], tmp_path, "audio/wav")
         public_url = create_presigned_url(phrase_paths["audio"], expires_seconds=60 * 24 * 3600)
@@ -157,6 +170,7 @@ class Worker:
             "status": "done",
             "result_key": phrase_paths["audio"],
             "public_url": public_url,
+            "output_trim": output_trim,
             "updated_at": int(time.time()),
         }
         write_json(phrase_paths["phrase_json"], phrase_json)

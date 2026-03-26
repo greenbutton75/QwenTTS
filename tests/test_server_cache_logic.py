@@ -63,6 +63,20 @@ def _install_test_stubs() -> None:
         lambda text, voice_prompt, reference_embedding, min_similarity, max_attempts:
         (np.zeros(8, dtype=np.float32), 24000, 0.99, 1, True)
     )
+    fake_tts.clean_output_audio = (
+        lambda wav, sr: (
+            wav,
+            sr,
+            {"trimmed": 0, "leading_ms": 0, "trailing_ms": 0, "original_ms": 0, "cleaned_ms": 0},
+        )
+    )
+    fake_tts.clean_reference_audio = (
+        lambda wav, sr: (
+            wav,
+            sr,
+            {"trimmed": 0, "leading_ms": 0, "trailing_ms": 0, "original_ms": 0, "cleaned_ms": 0},
+        )
+    )
     fake_tts.load_audio = lambda path: (np.zeros(8, dtype=np.float32), 24000)
     fake_tts.write_wav_temp = lambda wav, sr: "tmp.wav"
     fake_tts.splice_speech_segments = lambda **kwargs: np.zeros(8, dtype=np.float32)
@@ -145,6 +159,41 @@ class ServerCacheLogicTests(unittest.TestCase):
 
         self.assertNotEqual(greedy_hash, sampled_hash)
 
+    def test_body_cache_hash_changes_when_output_trim_config_changes(self) -> None:
+        prompt = {
+            "ref_code": np.array([[1, 2, 3]], dtype=np.int16),
+            "ref_spk_embedding": np.array([0.1, 0.2], dtype=np.float32),
+            "x_vector_only_mode": False,
+            "icl_mode": True,
+            "ref_text": "sample one",
+        }
+        trimmed_hash = body_cache_hash(
+            "support-1",
+            "voice-1",
+            "Shared body",
+            "1.7B",
+            "English",
+            prompt,
+            generation_config={
+                "voice_clone": {"do_sample": False},
+                "output_trim": {"enabled": True, "pad_ms": 30},
+            },
+        )
+        untrimmed_hash = body_cache_hash(
+            "support-1",
+            "voice-1",
+            "Shared body",
+            "1.7B",
+            "English",
+            prompt,
+            generation_config={
+                "voice_clone": {"do_sample": False},
+                "output_trim": {"enabled": False, "pad_ms": 0},
+            },
+        )
+
+        self.assertNotEqual(trimmed_hash, untrimmed_hash)
+
     def test_profile_refresh_clears_splice_cache_and_records_prompt_fingerprint(self) -> None:
         worker = server_worker.Worker(db=MagicMock(), logger=MagicMock())
         prompt_item = SimpleNamespace(
@@ -166,6 +215,7 @@ class ServerCacheLogicTests(unittest.TestCase):
         with patch.object(server_worker, "download_bytes", return_value=b"sample"), \
              patch.object(server_worker, "bytes_to_wav_file", return_value="tmp.wav"), \
              patch.object(server_worker, "load_audio", return_value=(np.zeros(8, dtype=np.float32), 24000)), \
+             patch.object(server_worker, "clean_reference_audio", return_value=(np.zeros(8, dtype=np.float32), 24000, {"trimmed": 1, "leading_ms": 200, "trailing_ms": 0, "original_ms": 1200, "cleaned_ms": 1000})), \
              patch.object(server_worker, "create_voice_prompt", return_value=prompt_item), \
              patch.object(server_worker, "delete_prefix") as delete_prefix_mock, \
              patch.object(server_worker, "upload_file"), \
@@ -181,6 +231,7 @@ class ServerCacheLogicTests(unittest.TestCase):
             voice_json["prompt_fingerprint"],
             prompt_fingerprint(upload_payload),
         )
+        self.assertEqual(voice_json["reference_trim"]["leading_ms"], 200)
 
 
 if __name__ == "__main__":

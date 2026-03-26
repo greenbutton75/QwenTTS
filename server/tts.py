@@ -9,7 +9,20 @@ from pydub import AudioSegment
 
 from qwen_tts import Qwen3TTSModel, VoiceClonePromptItem
 
-from .config import MODEL_SIZE, LANGUAGE, greeting_similarity_retry_generate_config, voice_clone_generate_config
+from .config import (
+    LANGUAGE,
+    MODEL_SIZE,
+    OUTPUT_AUDIO_TRIM_ENABLED,
+    OUTPUT_AUDIO_TRIM_MAX_LEADING_MS,
+    OUTPUT_AUDIO_TRIM_MAX_TRAILING_MS,
+    OUTPUT_AUDIO_TRIM_PAD_MS,
+    REFERENCE_AUDIO_TRIM_ENABLED,
+    REFERENCE_AUDIO_TRIM_MAX_LEADING_MS,
+    REFERENCE_AUDIO_TRIM_MAX_TRAILING_MS,
+    REFERENCE_AUDIO_TRIM_PAD_MS,
+    greeting_similarity_retry_generate_config,
+    voice_clone_generate_config,
+)
 
 
 _MODEL_CACHE: Dict[str, Qwen3TTSModel] = {}
@@ -168,6 +181,7 @@ def generate_voice_with_similarity_retry(
     for attempt in range(1, total_attempts + 1):
         generate_config = None if attempt == 1 else dict(_GREETING_RETRY_GENERATE_CONFIG)
         wav, sr = generate_voice(text, voice_prompt, generate_config=generate_config)
+        wav, sr, _ = clean_output_audio(wav, sr)
         similarity = speaker_similarity(wav, sr, reference_embedding)
         if similarity > best_similarity or best_wav is None:
             best_wav = wav
@@ -220,6 +234,143 @@ def _adaptive_vad_threshold(rms: np.ndarray) -> float:
     high = float(np.percentile(rms, 90))
     # Conservative threshold to pick near-silence regions.
     return max(1e-5, base + 0.2 * max(0.0, high - base))
+
+
+def _find_active_run_start(active: np.ndarray, min_run: int) -> Optional[int]:
+    run = 0
+    for idx, value in enumerate(active):
+        run = run + 1 if value else 0
+        if run >= min_run:
+            return idx - min_run + 1
+    return None
+
+
+def _find_active_run_end(active: np.ndarray, min_run: int) -> Optional[int]:
+    run = 0
+    for idx in range(active.size - 1, -1, -1):
+        if active[idx]:
+            run += 1
+            if run >= min_run:
+                return idx + min_run - 1
+        else:
+            run = 0
+    return None
+
+
+def trim_audio_edges(
+    wav: np.ndarray,
+    sr: int,
+    pad_ms: int,
+    max_leading_ms: int,
+    max_trailing_ms: int,
+    frame_ms: int = 20,
+    hop_ms: int = 10,
+    min_run_frames: int = 3,
+) -> Tuple[np.ndarray, Dict[str, int]]:
+    audio = _normalize_audio(wav)
+    total_samples = int(audio.shape[0])
+    if total_samples == 0:
+        return audio, {
+            "trimmed": 0,
+            "leading_ms": 0,
+            "trailing_ms": 0,
+            "original_ms": 0,
+            "cleaned_ms": 0,
+        }
+
+    frame_samples = max(1, int(sr * frame_ms / 1000.0))
+    hop_samples = max(1, int(sr * hop_ms / 1000.0))
+    rms = _rms_envelope(audio, frame_samples=frame_samples, hop_samples=hop_samples)
+    if rms.size == 0:
+        return audio, {
+            "trimmed": 0,
+            "leading_ms": 0,
+            "trailing_ms": 0,
+            "original_ms": int(round(total_samples * 1000.0 / sr)),
+            "cleaned_ms": int(round(total_samples * 1000.0 / sr)),
+        }
+
+    threshold = _adaptive_vad_threshold(rms)
+    active = rms > threshold
+    start_frame = _find_active_run_start(active, min_run=min_run_frames)
+    end_frame = _find_active_run_end(active, min_run=min_run_frames)
+    if start_frame is None or end_frame is None:
+        return audio, {
+            "trimmed": 0,
+            "leading_ms": 0,
+            "trailing_ms": 0,
+            "original_ms": int(round(total_samples * 1000.0 / sr)),
+            "cleaned_ms": int(round(total_samples * 1000.0 / sr)),
+        }
+
+    pad_samples = max(0, int(sr * pad_ms / 1000.0))
+    proposed_start = max(0, start_frame * hop_samples - pad_samples)
+    proposed_end = min(total_samples, end_frame * hop_samples + frame_samples + pad_samples)
+    max_leading_samples = max(0, int(sr * max_leading_ms / 1000.0))
+    max_trailing_samples = max(0, int(sr * max_trailing_ms / 1000.0))
+    start_sample = min(proposed_start, max_leading_samples)
+    end_sample = max(proposed_end, total_samples - max_trailing_samples)
+    if end_sample <= start_sample + max(1, frame_samples):
+        return audio, {
+            "trimmed": 0,
+            "leading_ms": 0,
+            "trailing_ms": 0,
+            "original_ms": int(round(total_samples * 1000.0 / sr)),
+            "cleaned_ms": int(round(total_samples * 1000.0 / sr)),
+        }
+
+    trimmed = audio[start_sample:end_sample]
+    leading_ms = int(round(start_sample * 1000.0 / sr))
+    trailing_ms = int(round((total_samples - end_sample) * 1000.0 / sr))
+    return trimmed, {
+        "trimmed": int(start_sample > 0 or end_sample < total_samples),
+        "leading_ms": leading_ms,
+        "trailing_ms": trailing_ms,
+        "original_ms": int(round(total_samples * 1000.0 / sr)),
+        "cleaned_ms": int(round(trimmed.shape[0] * 1000.0 / sr)),
+    }
+
+
+def clean_reference_audio(wav: np.ndarray, sr: int) -> Tuple[np.ndarray, int, Dict[str, int]]:
+    audio = _normalize_audio(wav)
+    if not REFERENCE_AUDIO_TRIM_ENABLED:
+        stats = {
+            "trimmed": 0,
+            "leading_ms": 0,
+            "trailing_ms": 0,
+            "original_ms": int(round(audio.shape[0] * 1000.0 / sr)) if sr else 0,
+            "cleaned_ms": int(round(audio.shape[0] * 1000.0 / sr)) if sr else 0,
+        }
+        return audio, int(sr), stats
+    cleaned, stats = trim_audio_edges(
+        audio,
+        sr=int(sr),
+        pad_ms=REFERENCE_AUDIO_TRIM_PAD_MS,
+        max_leading_ms=REFERENCE_AUDIO_TRIM_MAX_LEADING_MS,
+        max_trailing_ms=REFERENCE_AUDIO_TRIM_MAX_TRAILING_MS,
+    )
+    return cleaned, int(sr), stats
+
+
+def clean_output_audio(wav: np.ndarray, sr: int) -> Tuple[np.ndarray, int, Dict[str, int]]:
+    audio = _normalize_audio(wav)
+    if not OUTPUT_AUDIO_TRIM_ENABLED:
+        stats = {
+            "trimmed": 0,
+            "leading_ms": 0,
+            "trailing_ms": 0,
+            "original_ms": int(round(audio.shape[0] * 1000.0 / sr)) if sr else 0,
+            "cleaned_ms": int(round(audio.shape[0] * 1000.0 / sr)) if sr else 0,
+        }
+        return audio, int(sr), stats
+    cleaned, stats = trim_audio_edges(
+        audio,
+        sr=int(sr),
+        pad_ms=OUTPUT_AUDIO_TRIM_PAD_MS,
+        max_leading_ms=OUTPUT_AUDIO_TRIM_MAX_LEADING_MS,
+        max_trailing_ms=OUTPUT_AUDIO_TRIM_MAX_TRAILING_MS,
+    )
+    return cleaned, int(sr), stats
 
 
 def _find_boundary_sample(

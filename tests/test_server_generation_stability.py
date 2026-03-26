@@ -106,7 +106,7 @@ class ServerGenerationStabilityTests(unittest.TestCase):
                 max_attempts=3,
             )
 
-        self.assertIs(out_wav, wav)
+        self.assertTrue(np.array_equal(out_wav, wav))
         self.assertEqual(sr, 24000)
         self.assertAlmostEqual(similarity, 0.81, places=6)
         self.assertEqual(attempts, 2)
@@ -114,9 +114,9 @@ class ServerGenerationStabilityTests(unittest.TestCase):
         self.assertEqual(generate_mock.call_count, 2)
 
     def test_similarity_retry_returns_best_attempt_when_threshold_not_met(self) -> None:
-        wav1 = np.ones(8, dtype=np.float32)
-        wav2 = np.full(8, 2.0, dtype=np.float32)
-        wav3 = np.full(8, 3.0, dtype=np.float32)
+        wav1 = np.full(8, 0.1, dtype=np.float32)
+        wav2 = np.full(8, 0.2, dtype=np.float32)
+        wav3 = np.full(8, 0.3, dtype=np.float32)
         with patch.object(server_tts, "generate_voice", side_effect=[(wav1, 24000), (wav2, 24000), (wav3, 24000)]), \
              patch.object(server_tts, "speaker_similarity", side_effect=[0.20, 0.48, 0.35]):
             out_wav, sr, similarity, attempts, passed = server_tts.generate_voice_with_similarity_retry(
@@ -127,11 +127,38 @@ class ServerGenerationStabilityTests(unittest.TestCase):
                 max_attempts=3,
             )
 
-        self.assertIs(out_wav, wav2)
+        self.assertTrue(np.array_equal(out_wav, wav2))
         self.assertEqual(sr, 24000)
         self.assertAlmostEqual(similarity, 0.48, places=6)
         self.assertEqual(attempts, 3)
         self.assertFalse(passed)
+
+    def test_trim_audio_edges_removes_leading_and_trailing_silence(self) -> None:
+        silence = np.zeros(2400, dtype=np.float32)
+        voice = np.full(4800, 0.2, dtype=np.float32)
+        wav = np.concatenate([silence, voice, silence])
+
+        cleaned, stats = server_tts.trim_audio_edges(
+            wav,
+            sr=24000,
+            pad_ms=20,
+            max_leading_ms=500,
+            max_trailing_ms=500,
+        )
+
+        self.assertLess(cleaned.shape[0], wav.shape[0])
+        self.assertGreater(stats["leading_ms"], 0)
+        self.assertGreater(stats["trailing_ms"], 0)
+        self.assertEqual(stats["trimmed"], 1)
+
+    def test_clean_reference_audio_respects_disabled_flag(self) -> None:
+        wav = np.concatenate([np.zeros(1200, dtype=np.float32), np.full(2400, 0.2, dtype=np.float32)])
+        with patch.object(server_tts, "REFERENCE_AUDIO_TRIM_ENABLED", False):
+            cleaned, sr, stats = server_tts.clean_reference_audio(wav, 24000)
+
+        self.assertTrue(np.array_equal(cleaned, wav))
+        self.assertEqual(sr, 24000)
+        self.assertEqual(stats["trimmed"], 0)
 
 
 if __name__ == "__main__":
