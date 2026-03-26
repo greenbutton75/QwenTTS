@@ -34,6 +34,7 @@ def _install_test_stubs() -> None:
     fake_qwen_client.create_profile = lambda *args, **kwargs: {}
     fake_qwen_client.get_phrase_status = lambda *args, **kwargs: {"status": "done"}
     fake_qwen_client.get_profile_status = lambda *args, **kwargs: {"status": "done"}
+    fake_qwen_client.health_check = lambda: {"status": "ok"}
     sys.modules.setdefault("task_worker.qwen_client", fake_qwen_client)
 
     fake_s3_utils = types.ModuleType("task_worker.s3_utils")

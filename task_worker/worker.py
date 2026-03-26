@@ -9,11 +9,22 @@ from .config import (
     MAX_WAIT_SECONDS,
     PHRASE_PAGE_SIZE,
     PHRASE_POLL_INTERVAL,
+    PHRASE_SPLICE_CROSSFADE_MS,
+    PHRASE_SPLICE_PAUSE_MS,
     PROFILE_POLL_INTERVAL,
+    QWEN_TTS_READY_POLL_INTERVAL,
+    QWEN_TTS_READY_TIMEOUT_SECONDS,
     STAGE_PROCESSING,
 )
 from .health import HealthState
-from .qwen_client import create_phrase, create_phrase_splice, create_profile, get_phrase_status, get_profile_status
+from .qwen_client import (
+    create_phrase,
+    create_phrase_splice,
+    create_profile,
+    get_phrase_status,
+    get_profile_status,
+    health_check,
+)
 from .s3_utils import object_exists, read_json
 from .task_api import (
     complete_task,
@@ -76,6 +87,31 @@ def _profile_ready_in_s3(support_id: str, voice_id: str) -> bool:
         return data.get("status") == "done"
     except Exception:
         return False
+
+
+def _wait_for_qwen_tts_ready(state: HealthState) -> None:
+    start = time.time()
+    attempts = 0
+    while True:
+        attempts += 1
+        try:
+            payload = health_check()
+            if payload.get("status") == "ok":
+                if attempts > 1:
+                    logger.info("Qwen TTS API became ready after %s attempts.", attempts)
+                return
+        except Exception as exc:
+            state.set_error(str(exc))
+            elapsed = time.time() - start
+            if elapsed >= QWEN_TTS_READY_TIMEOUT_SECONDS:
+                logger.warning(
+                    "Qwen TTS API is still unavailable after %.1fs; worker will keep waiting.",
+                    elapsed,
+                )
+                start = time.time()
+            else:
+                logger.info("Waiting for Qwen TTS API readiness: %s", exc)
+        time.sleep(max(1, QWEN_TTS_READY_POLL_INTERVAL))
 
 
 def _normalize_body_for_grouping(text: str) -> str:
@@ -141,8 +177,8 @@ def _submit_and_wait_splice_phrase(
         phrase_id=phrase_id,
         greeting=greeting,
         body=body,
-        pause_ms=120,
-        crossfade_ms=10,
+        pause_ms=PHRASE_SPLICE_PAUSE_MS,
+        crossfade_ms=PHRASE_SPLICE_CROSSFADE_MS,
         content_aware=True,
         target_lufs=-16.0,
     )
@@ -349,8 +385,10 @@ def process_phrases_batch(state: HealthState) -> None:
 
 def run_loop(state: HealthState) -> None:
     backoff = 5
+    _wait_for_qwen_tts_ready(state)
     while True:
         try:
+            _wait_for_qwen_tts_ready(state)
             process_create_profiles(state)
             process_phrases_batch(state)
             backoff = 5

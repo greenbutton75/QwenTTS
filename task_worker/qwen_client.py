@@ -5,6 +5,13 @@ import requests
 from .config import QWEN_TTS_BASE_URL
 
 
+def health_check() -> dict:
+    url = f"{QWEN_TTS_BASE_URL}/health"
+    r = requests.get(url, timeout=5)
+    r.raise_for_status()
+    return r.json()
+
+
 def create_profile(
     support_id: str,
     voice_id: str,
