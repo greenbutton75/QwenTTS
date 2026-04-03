@@ -101,6 +101,47 @@ nohup /workspace/QwenTTS/scripts/run_api.sh > /workspace/QwenTTS/logs/uvicorn.ou
 nohup /workspace/QwenTTS/scripts/run_worker.sh > /workspace/QwenTTS/logs/task_worker.out 2>&1 &
 ```
 
+Important:
+
+- these scripts do not load `.env` or `/etc/qwentts.env` on their own
+- before manual restart in SSH, load env into the current shell first
+
+Minimal manual restart sequence:
+
+```bash
+set -a
+source /etc/qwentts.env
+set +a
+
+pkill -f "scripts/run_api.sh" || true
+pkill -f "uvicorn server.app:app" || true
+pkill -f "scripts/run_worker.sh" || true
+pkill -f "python -m task_worker.main" || true
+
+nohup /workspace/QwenTTS/scripts/run_api.sh > /workspace/QwenTTS/logs/uvicorn.out 2>&1 &
+nohup /workspace/QwenTTS/scripts/run_worker.sh > /workspace/QwenTTS/logs/task_worker.out 2>&1 &
+```
+
+If `/etc/qwentts.env` is missing or stale, restore it first from `/workspace/QwenTTS/qwentts.env` or rebuild it from S3 as shown in `README.md` / `docs/vastai.md`.
+
+## Audio cleanup update (2026-04-04)
+
+The server-side output cleanup was extended to handle real production failures:
+
+- removes long silence/noise at the start of generated audio
+- removes trailing silence more aggressively
+- compacts long internal silent spans in generated phrases
+- affects both full-phrase and splice generation paths because the cleanup lives in the shared server audio postprocess
+
+New relevant env:
+
+```
+OUTPUT_AUDIO_TRIM_MAX_LEADING_MS=15000
+OUTPUT_AUDIO_TRIM_MAX_TRAILING_MS=2000
+OUTPUT_AUDIO_MAX_INTERNAL_SILENCE_MS=600
+OUTPUT_AUDIO_TRIM_ALGORITHM_VERSION=rms_flatness_pause_compact_v3
+```
+
 ## Resilience
 
 The worker loop catches unexpected errors (e.g., DNS failures) and retries with exponential backoff (up to 5 minutes).

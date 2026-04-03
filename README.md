@@ -212,6 +212,91 @@ nohup /workspace/QwenTTS/scripts/run_api.sh > logs/uvicorn.out 2>&1 &
 nohup /workspace/QwenTTS/scripts/run_worker.sh > logs/task_worker.out 2>&1 &
 ```
 
+### Manual SSH Restart (important)
+
+If you restart the service manually in an SSH session, note:
+
+- `scripts/run_api.sh` and `scripts/run_worker.sh` do **not** load env files by themselves.
+- They use only the environment already present in the current shell.
+- So before restart you must `source` the same env that Onstart assembled into `/etc/qwentts.env`.
+
+Quick path if `/etc/qwentts.env` is already valid:
+
+```bash
+set -a
+source /etc/qwentts.env
+set +a
+```
+
+Full restart flow from SSH:
+
+```bash
+cd /workspace/QwenTTS
+git pull origin main
+
+set -a
+source /etc/qwentts.env
+set +a
+
+mkdir -p /workspace/QwenTTS/logs /workspace/QwenTTS/data /workspace/QwenTTS/tmp
+chmod +x /workspace/QwenTTS/scripts/run_api.sh /workspace/QwenTTS/scripts/run_worker.sh
+
+pkill -f "scripts/run_api.sh" || true
+pkill -f "uvicorn server.app:app" || true
+pkill -f "scripts/run_worker.sh" || true
+pkill -f "python -m task_worker.main" || true
+
+nohup /workspace/QwenTTS/scripts/run_api.sh > /workspace/QwenTTS/logs/uvicorn.out 2>&1 &
+nohup /workspace/QwenTTS/scripts/run_worker.sh > /workspace/QwenTTS/logs/task_worker.out 2>&1 &
+
+sleep 8
+curl http://127.0.0.1:8000/health
+curl http://127.0.0.1:8010/health
+```
+
+If `/etc/qwentts.env` was lost or is incomplete, rebuild it before restart.
+
+Fastest fallback from the local checked-out file:
+
+```bash
+cp /workspace/QwenTTS/qwentts.env /etc/qwentts.env
+set -a
+source /etc/qwentts.env
+set +a
+```
+
+If you want to refresh `/etc/qwentts.env` from S3 but `awscli` is broken, use boto3 instead:
+
+```bash
+cd /workspace/QwenTTS
+set -a
+source /workspace/QwenTTS/qwentts.env
+set +a
+
+python - <<'PY'
+import os
+import boto3
+
+s3 = boto3.client(
+    "s3",
+    aws_access_key_id=os.environ["AWS_ACCESS_KEY_ID"],
+    aws_secret_access_key=os.environ["AWS_SECRET_ACCESS_KEY"],
+    region_name=os.environ.get("AWS_REGION", "us-east-1"),
+)
+body = s3.get_object(
+    Bucket=os.environ["S3_BUCKET_NAME"],
+    Key="secrets/qwentts.env",
+)["Body"].read().decode("utf-8").replace("\r\n", "\n")
+open("/etc/qwentts.env", "w", encoding="utf-8").write(body if body.endswith("\n") else body + "\n")
+PY
+
+set -a
+source /etc/qwentts.env
+set +a
+```
+
+After that, run the restart block above.
+
 
 
 ### Проверка
@@ -307,6 +392,28 @@ python -m task_submitter.main create-phrase ^
   --text "Protect and distribute your assets according to your wishes with our comprehensive trust administration services."
 ```
 
+
+## Vast.ai Watchdog
+
+For interruptible Vast.ai production use, the repository now includes a local Windows watchdog that recreates the QwenTTS instance when it is outbid or stops answering on `/health`.
+
+Files:
+
+- `scripts/vast-qwentts-common.ps1`
+- `scripts/start-qwentts.ps1`
+- `scripts/monitor-qwentts.ps1`
+- `docs/watchdog.md`
+
+Quick start:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\scripts\start-qwentts.ps1
+powershell -ExecutionPolicy Bypass -File .\scripts\monitor-qwentts.ps1
+```
+
+The watchdog uses the local Vast.ai CLI plus `vast_api_key`, monitors the public API health endpoint, cleans up dead or duplicate instances, and recreates the service from the configured Vast template on A100 80GB offers.
+
+See `docs/watchdog.md` for configuration, recovery logic, and required env overrides.
 ## Docs
 
 - `docs/vastai.md` — Vast.ai deployment + e2e check
@@ -330,6 +437,42 @@ python -m task_submitter.main create-phrase ^
 - Дополнительные env для этой функции не обязательны.
 - `ENABLE_PHRASE_SPLICE_GROUPING` по умолчанию `true`.
 - Для принудительного отключения: `ENABLE_PHRASE_SPLICE_GROUPING=false`.
+
+## Update (2026-04-04)
+
+Сегодня доработан общий постпроцесс аудио в прод-контуре:
+
+- Усилен trim начала/конца выходного WAV:
+  - лучше режет стартовую тишину;
+  - лучше режет короткие стартовые шумы/артефакты;
+  - `OUTPUT_AUDIO_TRIM_MAX_LEADING_MS` поднят до `15000`;
+  - `OUTPUT_AUDIO_TRIM_MAX_TRAILING_MS` поднят до `2000`.
+- Добавлено схлопывание чрезмерно длинных тихих участков внутри фразы:
+  - новый env: `OUTPUT_AUDIO_MAX_INTERNAL_SILENCE_MS` (default `600`);
+  - длинные паузы внутри generated audio теперь сокращаются до разумного размера.
+- Очистка применяется к:
+  - full-phrase output,
+  - `greeting`,
+  - cached/generated `body`,
+  - final merged splice output.
+- Обновлена версия алгоритма output trim/cache fingerprint:
+  - старый `splice_cache/body_*.wav` не используется новым кодом;
+  - уже сгенерированные плохие `phrases/*.wav` в S3 нужно перегенерировать отдельно.
+- Добавлены регрессионные тесты на:
+  - длинную тишину в начале,
+  - длинную тишину в середине фразы,
+  - смену версии trim-алгоритма в cache key.
+
+Новые/важные env для контроля поведения:
+
+```
+OUTPUT_AUDIO_TRIM_ENABLED=true
+OUTPUT_AUDIO_TRIM_PAD_MS=30
+OUTPUT_AUDIO_TRIM_MAX_LEADING_MS=15000
+OUTPUT_AUDIO_TRIM_MAX_TRAILING_MS=2000
+OUTPUT_AUDIO_MAX_INTERNAL_SILENCE_MS=600
+OUTPUT_AUDIO_TRIM_ALGORITHM_VERSION=rms_flatness_pause_compact_v3
+```
 
 ## Возможности
 
@@ -366,3 +509,4 @@ Young female voice, warm and friendly, speaking with enthusiasm
 - 🤗 [Hugging Face](https://huggingface.co/collections/Qwen/qwen3-tts)
 - 📑 [Blog](https://qwen.ai/blog?id=qwen3tts-0115)
 - 📑 [Paper](https://arxiv.org/abs/2601.15621)
+

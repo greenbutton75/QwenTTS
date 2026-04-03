@@ -119,6 +119,81 @@ nohup /workspace/QwenTTS/scripts/run_api.sh > logs/uvicorn.out 2>&1 &
 nohup /workspace/QwenTTS/scripts/run_worker.sh > logs/task_worker.out 2>&1 &
 ```
 
+## 2a) Manual SSH Restart With Env Reload
+
+Important:
+
+- `scripts/run_api.sh` and `scripts/run_worker.sh` do not source env files.
+- They only inherit variables from the current shell.
+- In a fresh SSH session you must reload env first, otherwise API/worker may start without tokens or S3 settings.
+
+Quick restart when `/etc/qwentts.env` already exists and is valid:
+
+```bash
+cd /workspace/QwenTTS
+git pull origin main
+
+set -a
+source /etc/qwentts.env
+set +a
+
+mkdir -p /workspace/QwenTTS/logs /workspace/QwenTTS/data /workspace/QwenTTS/tmp
+chmod +x /workspace/QwenTTS/scripts/run_api.sh /workspace/QwenTTS/scripts/run_worker.sh
+
+pkill -f "scripts/run_api.sh" || true
+pkill -f "uvicorn server.app:app" || true
+pkill -f "scripts/run_worker.sh" || true
+pkill -f "python -m task_worker.main" || true
+
+nohup /workspace/QwenTTS/scripts/run_api.sh > /workspace/QwenTTS/logs/uvicorn.out 2>&1 &
+nohup /workspace/QwenTTS/scripts/run_worker.sh > /workspace/QwenTTS/logs/task_worker.out 2>&1 &
+
+sleep 8
+curl http://127.0.0.1:8000/health
+curl http://127.0.0.1:8010/health
+```
+
+If `/etc/qwentts.env` needs to be restored quickly:
+
+```bash
+cp /workspace/QwenTTS/qwentts.env /etc/qwentts.env
+set -a
+source /etc/qwentts.env
+set +a
+```
+
+If you need to refresh env from S3 and `awscli` is failing, use boto3 instead:
+
+```bash
+cd /workspace/QwenTTS
+set -a
+source /workspace/QwenTTS/qwentts.env
+set +a
+
+python - <<'PY'
+import os
+import boto3
+
+s3 = boto3.client(
+    "s3",
+    aws_access_key_id=os.environ["AWS_ACCESS_KEY_ID"],
+    aws_secret_access_key=os.environ["AWS_SECRET_ACCESS_KEY"],
+    region_name=os.environ.get("AWS_REGION", "us-east-1"),
+)
+body = s3.get_object(
+    Bucket=os.environ["S3_BUCKET_NAME"],
+    Key="secrets/qwentts.env",
+)["Body"].read().decode("utf-8").replace("\r\n", "\n")
+open("/etc/qwentts.env", "w", encoding="utf-8").write(body if body.endswith("\n") else body + "\n")
+PY
+
+set -a
+source /etc/qwentts.env
+set +a
+```
+
+Then run the restart block above.
+
 
 
 ## 2) Start Instance Using the Template
@@ -201,3 +276,62 @@ Verification:
   - `phrase_splice_path`
   - `phrase_fallback_full`
   - `splice_failures`
+
+## 7a) Audio Cleanup Update (2026-04-04)
+
+Production audio postprocess was strengthened after real cases with multi-second silence/noise:
+
+- leading output trim is now much more permissive for bad starts:
+  - `OUTPUT_AUDIO_TRIM_MAX_LEADING_MS=15000`
+- trailing trim limit increased:
+  - `OUTPUT_AUDIO_TRIM_MAX_TRAILING_MS=2000`
+- long internal quiet spans are compacted:
+  - `OUTPUT_AUDIO_MAX_INTERNAL_SILENCE_MS=600`
+- cleanup now applies to:
+  - full phrase generation,
+  - splice greeting,
+  - cached/generated body,
+  - final merged phrase
+- trim/cache fingerprint version was bumped:
+  - `OUTPUT_AUDIO_TRIM_ALGORITHM_VERSION=rms_flatness_pause_compact_v3`
+  - new code will not reuse old body cache objects generated with older trim behavior
+
+Operational note:
+
+- old `phrases/*.wav` already stored in S3 remain unchanged and must be regenerated
+- old `splice_cache/` can be left in place, but a profile refresh or new cache key will bypass it automatically
+
+## 8) Windows Watchdog
+
+For interruptible production use, run the local watchdog from a Windows host outside Vast. It uses the Vast.ai CLI and `vast_api_key` to recreate the instance when it is outbid, becomes unhealthy, or disappears.
+
+Files:
+
+- `scripts/vast-qwentts-common.ps1`
+- `scripts/start-qwentts.ps1`
+- `scripts/monitor-qwentts.ps1`
+- `docs/watchdog.md`
+
+One-shot start or restore:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\scripts\start-qwentts.ps1
+```
+
+Continuous watchdog:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\scripts\monitor-qwentts.ps1
+```
+
+Default behavior:
+
+- watches the instance by label
+- verifies public `GET /health`
+- removes dead or duplicate instances
+- treats repeated health failures as a recycle condition
+- searches new offers on 1x A100 80GB class GPUs
+- applies an aggressive bid ladder above `min_bid`
+- waits for a stability window before accepting a replacement as healthy
+
+Full details: `docs/watchdog.md`
