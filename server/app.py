@@ -178,6 +178,7 @@ def _synthesize_spliced_phrase(
     target_lufs: float,
 ):
     prompt_data, voice_prompt = _load_voice_prompt(support_id, voice_id)
+    prompt_digest = prompt_fingerprint(prompt_data)
     greeting_similarity = None
     greeting_attempts = 1
     greeting_similarity_passed = None
@@ -201,6 +202,7 @@ def _synthesize_spliced_phrase(
             )
     else:
         greeting_wav, sr_greeting = generate_voice(greeting, voice_prompt)
+        greeting_wav, sr_greeting, _ = clean_output_audio(greeting_wav, sr_greeting)
     body_wav, sr_body, body_hash, body_cache_hit = _load_or_generate_body_wav(
         support_id=support_id,
         voice_id=voice_id,

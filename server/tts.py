@@ -227,6 +227,35 @@ def _rms_envelope(signal: np.ndarray, frame_samples: int, hop_samples: int) -> n
     return np.asarray(rms, dtype=np.float32)
 
 
+def _spectral_flatness_envelope(signal: np.ndarray, frame_samples: int, hop_samples: int) -> np.ndarray:
+    if signal.size == 0:
+        return np.zeros((0,), dtype=np.float32)
+    frame_samples = max(1, int(frame_samples))
+    hop_samples = max(1, int(hop_samples))
+
+    window = np.hanning(frame_samples).astype(np.float32)
+    if not np.any(window):
+        window = np.ones((frame_samples,), dtype=np.float32)
+
+    frames = []
+    if signal.size <= frame_samples:
+        frame = np.zeros((frame_samples,), dtype=np.float32)
+        frame[: signal.size] = signal.astype(np.float32)
+        frames.append(frame)
+    else:
+        for start in range(0, signal.size - frame_samples + 1, hop_samples):
+            frames.append(signal[start : start + frame_samples].astype(np.float32))
+
+    flatness = []
+    for frame in frames:
+        spectrum = np.abs(np.fft.rfft(frame * window)).astype(np.float32)
+        spectrum = np.maximum(spectrum, 1e-8)
+        geo_mean = float(np.exp(np.mean(np.log(spectrum))))
+        ar_mean = float(np.mean(spectrum))
+        flatness.append(0.0 if ar_mean <= 1e-12 else geo_mean / ar_mean)
+    return np.asarray(flatness, dtype=np.float32)
+
+
 def _adaptive_vad_threshold(rms: np.ndarray) -> float:
     if rms.size == 0:
         return 0.0
@@ -290,10 +319,31 @@ def trim_audio_edges(
             "cleaned_ms": int(round(total_samples * 1000.0 / sr)),
         }
 
+    flatness = _spectral_flatness_envelope(audio, frame_samples=frame_samples, hop_samples=hop_samples)
+    if flatness.size != rms.size:
+        min_len = min(rms.size, flatness.size)
+        rms = rms[:min_len]
+        flatness = flatness[:min_len]
+        if min_len == 0:
+            return audio, {
+                "trimmed": 0,
+                "leading_ms": 0,
+                "trailing_ms": 0,
+                "original_ms": int(round(total_samples * 1000.0 / sr)),
+                "cleaned_ms": int(round(total_samples * 1000.0 / sr)),
+            }
+
     threshold = _adaptive_vad_threshold(rms)
     active = rms > threshold
-    start_frame = _find_active_run_start(active, min_run=min_run_frames)
-    end_frame = _find_active_run_end(active, min_run=min_run_frames)
+    strong_threshold = max(threshold * 2.5, threshold + 1e-4)
+    flatness_threshold = min(0.5, float(np.percentile(flatness, 40)) + 0.12)
+    speech_like = active & ((flatness <= flatness_threshold) | (rms >= strong_threshold))
+
+    start_frame = _find_active_run_start(speech_like, min_run=min_run_frames)
+    end_frame = _find_active_run_end(speech_like, min_run=min_run_frames)
+    if start_frame is None or end_frame is None:
+        start_frame = _find_active_run_start(active, min_run=min_run_frames)
+        end_frame = _find_active_run_end(active, min_run=min_run_frames)
     if start_frame is None or end_frame is None:
         return audio, {
             "trimmed": 0,
@@ -388,7 +438,12 @@ def _find_boundary_sample(
     hop_samples = max(1, int(sr * hop_ms / 1000.0))
     rms = _rms_envelope(signal, frame_samples=frame_samples, hop_samples=hop_samples)
     thr = _adaptive_vad_threshold(rms)
-    low_mask = rms <= thr
+    flatness = _spectral_flatness_envelope(signal, frame_samples=frame_samples, hop_samples=hop_samples)
+    if flatness.size != rms.size:
+        min_len = min(rms.size, flatness.size)
+        rms = rms[:min_len]
+        flatness = flatness[:min_len]
+    low_mask = (rms <= thr) | (flatness >= 0.6)
 
     search_samples = max(1, int(sr * window_ms / 1000.0))
     frames_in_window = max(1, search_samples // hop_samples)

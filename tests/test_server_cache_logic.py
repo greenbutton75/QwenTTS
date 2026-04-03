@@ -194,6 +194,41 @@ class ServerCacheLogicTests(unittest.TestCase):
 
         self.assertNotEqual(trimmed_hash, untrimmed_hash)
 
+    def test_body_cache_hash_changes_when_trim_algorithm_version_changes(self) -> None:
+        prompt = {
+            "ref_code": np.array([[1, 2, 3]], dtype=np.int16),
+            "ref_spk_embedding": np.array([0.1, 0.2], dtype=np.float32),
+            "x_vector_only_mode": False,
+            "icl_mode": True,
+            "ref_text": "sample one",
+        }
+        hash_v1 = body_cache_hash(
+            "support-1",
+            "voice-1",
+            "Shared body",
+            "1.7B",
+            "English",
+            prompt,
+            generation_config={
+                "voice_clone": {"do_sample": False},
+                "output_trim": {"enabled": True, "algorithm_version": "v1"},
+            },
+        )
+        hash_v2 = body_cache_hash(
+            "support-1",
+            "voice-1",
+            "Shared body",
+            "1.7B",
+            "English",
+            prompt,
+            generation_config={
+                "voice_clone": {"do_sample": False},
+                "output_trim": {"enabled": True, "algorithm_version": "v2"},
+            },
+        )
+
+        self.assertNotEqual(hash_v1, hash_v2)
+
     def test_profile_refresh_clears_splice_cache_and_records_prompt_fingerprint(self) -> None:
         worker = server_worker.Worker(db=MagicMock(), logger=MagicMock())
         prompt_item = SimpleNamespace(

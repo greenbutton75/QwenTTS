@@ -76,6 +76,7 @@ OUTPUT_AUDIO_TRIM_ENABLED = _get_env_bool("OUTPUT_AUDIO_TRIM_ENABLED", True)
 OUTPUT_AUDIO_TRIM_PAD_MS = _get_env_int("OUTPUT_AUDIO_TRIM_PAD_MS", 30)
 OUTPUT_AUDIO_TRIM_MAX_LEADING_MS = _get_env_int("OUTPUT_AUDIO_TRIM_MAX_LEADING_MS", 1200)
 OUTPUT_AUDIO_TRIM_MAX_TRAILING_MS = _get_env_int("OUTPUT_AUDIO_TRIM_MAX_TRAILING_MS", 500)
+OUTPUT_AUDIO_TRIM_ALGORITHM_VERSION = os.getenv("OUTPUT_AUDIO_TRIM_ALGORITHM_VERSION", "rms_flatness_v2")
 
 
 def voice_clone_generate_config() -> dict:
@@ -116,4 +117,5 @@ def output_audio_trim_config() -> dict:
         "pad_ms": OUTPUT_AUDIO_TRIM_PAD_MS,
         "max_leading_ms": OUTPUT_AUDIO_TRIM_MAX_LEADING_MS,
         "max_trailing_ms": OUTPUT_AUDIO_TRIM_MAX_TRAILING_MS,
+        "algorithm_version": OUTPUT_AUDIO_TRIM_ALGORITHM_VERSION,
     }

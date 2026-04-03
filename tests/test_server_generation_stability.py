@@ -151,6 +151,24 @@ class ServerGenerationStabilityTests(unittest.TestCase):
         self.assertGreater(stats["trailing_ms"], 0)
         self.assertEqual(stats["trimmed"], 1)
 
+    def test_trim_audio_edges_removes_leading_noise_burst(self) -> None:
+        noise = np.random.default_rng(123).normal(0.0, 0.08, 2400).astype(np.float32)
+        t = np.linspace(0.0, 0.25, 6000, endpoint=False, dtype=np.float32)
+        voice = (0.24 * np.sin(2.0 * np.pi * 180.0 * t)).astype(np.float32)
+        wav = np.concatenate([noise, voice, np.zeros(1200, dtype=np.float32)])
+
+        cleaned, stats = server_tts.trim_audio_edges(
+            wav,
+            sr=24000,
+            pad_ms=20,
+            max_leading_ms=500,
+            max_trailing_ms=500,
+        )
+
+        self.assertLess(cleaned.shape[0], wav.shape[0])
+        self.assertGreater(stats["leading_ms"], 0)
+        self.assertEqual(stats["trimmed"], 1)
+
     def test_clean_reference_audio_respects_disabled_flag(self) -> None:
         wav = np.concatenate([np.zeros(1200, dtype=np.float32), np.full(2400, 0.2, dtype=np.float32)])
         with patch.object(server_tts, "REFERENCE_AUDIO_TRIM_ENABLED", False):
