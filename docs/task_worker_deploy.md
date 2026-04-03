@@ -131,6 +131,10 @@ The server-side output cleanup was extended to handle real production failures:
 - removes long silence/noise at the start of generated audio
 - removes trailing silence more aggressively
 - compacts long internal silent spans in generated phrases
+- rejects bad greeting starts for phrases beginning with `Hi` / `Hello`:
+  - short voiced garbage onset
+  - long low-energy pre-roll before the first strong speech segment
+- bad greeting/start candidates are retried instead of being hard-cut blindly
 - affects both full-phrase and splice generation paths because the cleanup lives in the shared server audio postprocess
 
 New relevant env:
@@ -140,7 +144,15 @@ OUTPUT_AUDIO_TRIM_MAX_LEADING_MS=15000
 OUTPUT_AUDIO_TRIM_MAX_TRAILING_MS=2000
 OUTPUT_AUDIO_MAX_INTERNAL_SILENCE_MS=600
 OUTPUT_AUDIO_TRIM_ALGORITHM_VERSION=rms_flatness_pause_compact_v3
+GREETING_ONSET_ARTIFACT_CHECK=true
+GREETING_ONSET_ARTIFACT_REQUIRE_PASS=true
 ```
+
+Operational note:
+
+- previously generated bad `phrases/*.wav` in S3 must be regenerated
+- if all greeting attempts still have a bad start, the task will now fail/retry instead of publishing a broken file
+- phrase metadata now includes start-quality fields such as `greeting_onset_*`, `greeting_preroll_*`, and `greeting_start_passed`
 
 ## Resilience
 

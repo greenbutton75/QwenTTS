@@ -450,17 +450,28 @@ See `docs/watchdog.md` for configuration, recovery logic, and required env overr
 - Добавлено схлопывание чрезмерно длинных тихих участков внутри фразы:
   - новый env: `OUTPUT_AUDIO_MAX_INTERNAL_SILENCE_MS` (default `600`);
   - длинные паузы внутри generated audio теперь сокращаются до разумного размера.
+- Добавлена защита от дефектных стартов greeting/full-phrase для фраз, начинающихся с `Hi`/`Hello`:
+  - детектируется короткий `voiced`-мусор в самом начале;
+  - детектируется длинный тихий pre-roll перед первой нормальной сильной речью;
+  - такие кандидаты не режутся вслепую, а отбраковываются и уходят на retry;
+  - это снижает риск отрезать живое начало настоящей речи.
 - Очистка применяется к:
   - full-phrase output,
   - `greeting`,
   - cached/generated `body`,
   - final merged splice output.
+- Для greeting/start quality теперь сохраняются дополнительные признаки в результатах:
+  - `greeting_onset_checked`, `greeting_onset_passed`, `greeting_onset_artifact`;
+  - `greeting_preroll_checked`, `greeting_preroll_passed`, `greeting_preroll_artifact`;
+  - `greeting_start_passed`.
 - Обновлена версия алгоритма output trim/cache fingerprint:
   - старый `splice_cache/body_*.wav` не используется новым кодом;
   - уже сгенерированные плохие `phrases/*.wav` в S3 нужно перегенерировать отдельно.
 - Добавлены регрессионные тесты на:
   - длинную тишину в начале,
   - длинную тишину в середине фразы,
+  - короткий мусорный `voiced`-старт,
+  - длинный тихий pre-roll перед реальной речью,
   - смену версии trim-алгоритма в cache key.
 
 Новые/важные env для контроля поведения:
@@ -472,7 +483,15 @@ OUTPUT_AUDIO_TRIM_MAX_LEADING_MS=15000
 OUTPUT_AUDIO_TRIM_MAX_TRAILING_MS=2000
 OUTPUT_AUDIO_MAX_INTERNAL_SILENCE_MS=600
 OUTPUT_AUDIO_TRIM_ALGORITHM_VERSION=rms_flatness_pause_compact_v3
+GREETING_ONSET_ARTIFACT_CHECK=true
+GREETING_ONSET_ARTIFACT_REQUIRE_PASS=true
 ```
+
+Операционно это значит:
+
+- старые плохие `phrases/*.wav` в S3 не исправятся сами, их нужно перегенерировать;
+- если все попытки greeting дают дефектный старт, сервис теперь лучше вернёт ошибку/ретрай, чем отдаст пользователю бракованный WAV;
+- новый код не должен повторно использовать старый `body` cache, если trim fingerprint изменился.
 
 ## Возможности
 

@@ -287,6 +287,10 @@ Production audio postprocess was strengthened after real cases with multi-second
   - `OUTPUT_AUDIO_TRIM_MAX_TRAILING_MS=2000`
 - long internal quiet spans are compacted:
   - `OUTPUT_AUDIO_MAX_INTERNAL_SILENCE_MS=600`
+- greeting/start quality is now protected for phrases beginning with `Hi` / `Hello`:
+  - short voiced garbage at the very beginning is rejected
+  - long low-energy pre-roll before the first strong speech segment is rejected
+  - bad candidates are retried instead of being hard-cut blindly
 - cleanup now applies to:
   - full phrase generation,
   - splice greeting,
@@ -296,10 +300,18 @@ Production audio postprocess was strengthened after real cases with multi-second
   - `OUTPUT_AUDIO_TRIM_ALGORITHM_VERSION=rms_flatness_pause_compact_v3`
   - new code will not reuse old body cache objects generated with older trim behavior
 
+Relevant greeting-start env:
+
+```bash
+GREETING_ONSET_ARTIFACT_CHECK=true
+GREETING_ONSET_ARTIFACT_REQUIRE_PASS=true
+```
+
 Operational note:
 
 - old `phrases/*.wav` already stored in S3 remain unchanged and must be regenerated
 - old `splice_cache/` can be left in place, but a profile refresh or new cache key will bypass it automatically
+- if all greeting attempts still produce a bad start, the service now fails the candidate instead of returning a broken WAV
 
 ## 8) Windows Watchdog
 
