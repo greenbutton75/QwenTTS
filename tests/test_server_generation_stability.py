@@ -97,8 +97,10 @@ class ServerGenerationStabilityTests(unittest.TestCase):
     def test_similarity_retry_accepts_second_attempt(self) -> None:
         wav = np.zeros(8, dtype=np.float32)
         with patch.object(server_tts, "generate_voice", side_effect=[(wav, 24000), (wav, 24000)]) as generate_mock, \
-             patch.object(server_tts, "speaker_similarity", side_effect=[0.21, 0.81]):
-            out_wav, sr, similarity, attempts, passed = server_tts.generate_voice_with_similarity_retry(
+             patch.object(server_tts, "speaker_similarity", side_effect=[0.21, 0.81]), \
+             patch.object(server_tts, "detect_greeting_onset_artifact", return_value={"artifact": 0, "checked": 1}), \
+             patch.object(server_tts, "detect_greeting_leading_preroll_artifact", return_value={"artifact": 0, "checked": 1}):
+            out_wav, sr, similarity, attempts, passed, quality = server_tts.generate_voice_with_similarity_retry(
                 text="Hi, Kevin,",
                 voice_prompt=["prompt"],
                 reference_embedding=np.array([0.1, 0.2], dtype=np.float32),
@@ -111,6 +113,7 @@ class ServerGenerationStabilityTests(unittest.TestCase):
         self.assertAlmostEqual(similarity, 0.81, places=6)
         self.assertEqual(attempts, 2)
         self.assertTrue(passed)
+        self.assertEqual(quality["onset_artifact"], 0)
         self.assertEqual(generate_mock.call_count, 2)
 
     def test_similarity_retry_returns_best_attempt_when_threshold_not_met(self) -> None:
@@ -118,8 +121,10 @@ class ServerGenerationStabilityTests(unittest.TestCase):
         wav2 = np.full(8, 0.2, dtype=np.float32)
         wav3 = np.full(8, 0.3, dtype=np.float32)
         with patch.object(server_tts, "generate_voice", side_effect=[(wav1, 24000), (wav2, 24000), (wav3, 24000)]), \
-             patch.object(server_tts, "speaker_similarity", side_effect=[0.20, 0.48, 0.35]):
-            out_wav, sr, similarity, attempts, passed = server_tts.generate_voice_with_similarity_retry(
+             patch.object(server_tts, "speaker_similarity", side_effect=[0.20, 0.48, 0.35]), \
+             patch.object(server_tts, "detect_greeting_onset_artifact", return_value={"artifact": 0, "checked": 1}), \
+             patch.object(server_tts, "detect_greeting_leading_preroll_artifact", return_value={"artifact": 0, "checked": 1}):
+            out_wav, sr, similarity, attempts, passed, quality = server_tts.generate_voice_with_similarity_retry(
                 text="Hi, Kevin,",
                 voice_prompt=["prompt"],
                 reference_embedding=np.array([0.1, 0.2], dtype=np.float32),
@@ -132,6 +137,34 @@ class ServerGenerationStabilityTests(unittest.TestCase):
         self.assertAlmostEqual(similarity, 0.48, places=6)
         self.assertEqual(attempts, 3)
         self.assertFalse(passed)
+        self.assertEqual(quality["onset_artifact"], 0)
+
+    def test_similarity_retry_rejects_long_preroll_candidate(self) -> None:
+        wav_bad = np.full(8, 0.1, dtype=np.float32)
+        wav_good = np.full(8, 0.2, dtype=np.float32)
+        with patch.object(server_tts, "generate_voice", side_effect=[(wav_bad, 24000), (wav_good, 24000)]), \
+             patch.object(server_tts, "speaker_similarity", side_effect=[0.82, 0.79]), \
+             patch.object(server_tts, "detect_greeting_onset_artifact", return_value={"artifact": 0, "checked": 1}), \
+             patch.object(
+                 server_tts,
+                 "detect_greeting_leading_preroll_artifact",
+                 side_effect=[{"artifact": 1, "checked": 1}, {"artifact": 0, "checked": 1}],
+             ):
+            out_wav, sr, similarity, attempts, passed, quality = server_tts.generate_voice_with_similarity_retry(
+                text="Hello Kevin,",
+                voice_prompt=["prompt"],
+                reference_embedding=np.array([0.1, 0.2], dtype=np.float32),
+                min_similarity=0.55,
+                max_attempts=3,
+            )
+
+        self.assertTrue(np.array_equal(out_wav, wav_good))
+        self.assertEqual(sr, 24000)
+        self.assertAlmostEqual(similarity, 0.79, places=6)
+        self.assertEqual(attempts, 2)
+        self.assertTrue(passed)
+        self.assertEqual(quality["preroll_artifact"], 0)
+        self.assertEqual(quality["start_passed"], 1)
 
     def test_trim_audio_edges_removes_leading_and_trailing_silence(self) -> None:
         silence = np.zeros(2400, dtype=np.float32)
@@ -202,6 +235,57 @@ class ServerGenerationStabilityTests(unittest.TestCase):
         self.assertLess(cleaned.shape[0], wav.shape[0] - (24000 * 3))
         self.assertEqual(stats["internal_silence_compressed"], 1)
         self.assertGreaterEqual(stats["internal_silence_removed_ms"], 3500)
+
+    def test_detect_greeting_onset_artifact_flags_stationary_voiced_start(self) -> None:
+        sr = 24000
+        t = np.linspace(0.0, 0.35, int(sr * 0.35), endpoint=False, dtype=np.float32)
+        voiced = (0.09 * np.sin(2.0 * np.pi * 180.0 * t)).astype(np.float32)
+        wav = np.concatenate([voiced, np.full(4800, 0.2, dtype=np.float32)])
+
+        stats = server_tts.detect_greeting_onset_artifact("Hi Kevin,", wav, sr)
+
+        self.assertEqual(stats["checked"], 1)
+        self.assertEqual(stats["artifact"], 1)
+
+    def test_detect_greeting_onset_artifact_allows_breathy_hi_start(self) -> None:
+        sr = 24000
+        rng = np.random.default_rng(7)
+        breath = rng.normal(0.0, 0.015, int(sr * 0.08)).astype(np.float32)
+        t = np.linspace(0.0, 0.27, int(sr * 0.27), endpoint=False, dtype=np.float32)
+        vowel = (0.09 * np.sin(2.0 * np.pi * 220.0 * t)).astype(np.float32)
+        wav = np.concatenate([breath, vowel, np.full(4800, 0.2, dtype=np.float32)])
+
+        stats = server_tts.detect_greeting_onset_artifact("Hello Kevin,", wav, sr)
+
+        self.assertEqual(stats["checked"], 1)
+        self.assertEqual(stats["artifact"], 0)
+
+    def test_detect_greeting_leading_preroll_artifact_flags_long_low_energy_preroll(self) -> None:
+        sr = 24000
+        rng = np.random.default_rng(9)
+        preroll = rng.normal(0.0, 0.010, int(sr * 2.5)).astype(np.float32)
+        t = np.linspace(0.0, 0.8, int(sr * 0.8), endpoint=False, dtype=np.float32)
+        speech = (0.18 * np.sin(2.0 * np.pi * 210.0 * t)).astype(np.float32)
+        wav = np.concatenate([preroll, speech, speech])
+
+        stats = server_tts.detect_greeting_leading_preroll_artifact("Hello Kevin,", wav, sr)
+
+        self.assertEqual(stats["checked"], 1)
+        self.assertEqual(stats["artifact"], 1)
+        self.assertGreaterEqual(stats["strong_start_ms"], 1500)
+
+    def test_detect_greeting_leading_preroll_artifact_allows_prompt_speech_start(self) -> None:
+        sr = 24000
+        rng = np.random.default_rng(11)
+        breath = rng.normal(0.0, 0.010, int(sr * 0.08)).astype(np.float32)
+        t = np.linspace(0.0, 1.0, int(sr * 1.0), endpoint=False, dtype=np.float32)
+        speech = (0.12 * np.sin(2.0 * np.pi * 220.0 * t)).astype(np.float32)
+        wav = np.concatenate([breath, speech, speech * 1.05])
+
+        stats = server_tts.detect_greeting_leading_preroll_artifact("Hi Kevin,", wav, sr)
+
+        self.assertEqual(stats["checked"], 1)
+        self.assertEqual(stats["artifact"], 0)
 
 
 if __name__ == "__main__":

@@ -1,4 +1,5 @@
 import io
+import re
 import tempfile
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -10,6 +11,7 @@ from pydub import AudioSegment
 from qwen_tts import Qwen3TTSModel, VoiceClonePromptItem
 
 from .config import (
+    GREETING_ONSET_ARTIFACT_CHECK,
     LANGUAGE,
     OUTPUT_AUDIO_MAX_INTERNAL_SILENCE_MS,
     MODEL_SIZE,
@@ -29,6 +31,7 @@ from .config import (
 _MODEL_CACHE: Dict[str, Qwen3TTSModel] = {}
 _VOICE_CLONE_GENERATE_CONFIG = voice_clone_generate_config()
 _GREETING_RETRY_GENERATE_CONFIG = greeting_similarity_retry_generate_config()
+_H_GREETING_RE = re.compile(r"^\s*(hi|hello)\b", re.IGNORECASE)
 
 
 def _get_device() -> str:
@@ -173,25 +176,63 @@ def generate_voice_with_similarity_retry(
     reference_embedding: Any,
     min_similarity: float,
     max_attempts: int,
-) -> Tuple[np.ndarray, int, float, int, bool]:
+) -> Tuple[np.ndarray, int, float, int, bool, Dict[str, float]]:
     total_attempts = max(1, int(max_attempts))
     best_wav = None
     best_sr = 0
     best_similarity = float("-inf")
+    best_quality = {
+        "similarity_passed": 0,
+        "onset_artifact": 0,
+        "onset_checked": 0,
+        "onset_passed": 1,
+        "preroll_artifact": 0,
+        "preroll_checked": 0,
+        "preroll_passed": 1,
+        "start_passed": 1,
+    }
+    best_clean_wav = None
+    best_clean_sr = 0
+    best_clean_similarity = float("-inf")
+    best_clean_quality = dict(best_quality)
 
     for attempt in range(1, total_attempts + 1):
         generate_config = None if attempt == 1 else dict(_GREETING_RETRY_GENERATE_CONFIG)
         wav, sr = generate_voice(text, voice_prompt, generate_config=generate_config)
         wav, sr, _ = clean_output_audio(wav, sr)
         similarity = speaker_similarity(wav, sr, reference_embedding)
+        onset_stats = detect_greeting_onset_artifact(text, wav, sr)
+        preroll_stats = detect_greeting_leading_preroll_artifact(text, wav, sr)
+        onset_passed = int(not onset_stats.get("artifact", 0))
+        preroll_passed = int(not preroll_stats.get("artifact", 0))
+        quality = {
+            "similarity_passed": int(similarity >= float(min_similarity)),
+            "onset_artifact": int(onset_stats.get("artifact", 0)),
+            "onset_checked": int(onset_stats.get("checked", 0)),
+            "onset_passed": onset_passed,
+            "preroll_artifact": int(preroll_stats.get("artifact", 0)),
+            "preroll_checked": int(preroll_stats.get("checked", 0)),
+            "preroll_passed": preroll_passed,
+            "start_passed": int(onset_passed and preroll_passed),
+            **onset_stats,
+            **{f"preroll_{key}": value for key, value in preroll_stats.items() if key not in {"artifact", "checked"}},
+        }
         if similarity > best_similarity or best_wav is None:
             best_wav = wav
             best_sr = sr
             best_similarity = similarity
-        if similarity >= float(min_similarity):
-            return wav, sr, similarity, attempt, True
+            best_quality = quality
+        if quality["start_passed"] and (similarity > best_clean_similarity or best_clean_wav is None):
+            best_clean_wav = wav
+            best_clean_sr = sr
+            best_clean_similarity = similarity
+            best_clean_quality = quality
+        if similarity >= float(min_similarity) and quality["start_passed"]:
+            return wav, sr, similarity, attempt, True, quality
 
-    return best_wav, best_sr, best_similarity, total_attempts, False
+    if best_clean_wav is not None:
+        return best_clean_wav, best_clean_sr, best_clean_similarity, total_attempts, False, best_clean_quality
+    return best_wav, best_sr, best_similarity, total_attempts, False, best_quality
 
 
 def write_wav_temp(wav: np.ndarray, sr: int) -> str:
@@ -266,6 +307,31 @@ def _adaptive_vad_threshold(rms: np.ndarray) -> float:
     return max(1e-5, base + 0.2 * max(0.0, high - base))
 
 
+def _spectral_centroid_envelope(signal: np.ndarray, sr: int, frame_samples: int, hop_samples: int) -> np.ndarray:
+    if signal.size == 0:
+        return np.zeros((0,), dtype=np.float32)
+    frame_samples = max(1, int(frame_samples))
+    hop_samples = max(1, int(hop_samples))
+    window = np.hanning(frame_samples).astype(np.float32)
+    if not np.any(window):
+        window = np.ones((frame_samples,), dtype=np.float32)
+    freqs = np.fft.rfftfreq(frame_samples, d=1.0 / float(sr)).astype(np.float32)
+
+    centroids = []
+    if signal.size <= frame_samples:
+        frame = np.zeros((frame_samples,), dtype=np.float32)
+        frame[: signal.size] = signal.astype(np.float32)
+        frames = [frame]
+    else:
+        frames = [signal[start : start + frame_samples].astype(np.float32) for start in range(0, signal.size - frame_samples + 1, hop_samples)]
+
+    for frame in frames:
+        spectrum = np.abs(np.fft.rfft(frame * window)).astype(np.float32)
+        denom = float(np.sum(spectrum))
+        centroids.append(0.0 if denom <= 1e-12 else float(np.sum(spectrum * freqs) / denom))
+    return np.asarray(centroids, dtype=np.float32)
+
+
 def _speech_frame_mask(
     signal: np.ndarray,
     sr: int,
@@ -291,6 +357,221 @@ def _speech_frame_mask(
     flatness_threshold = min(0.5, float(np.percentile(flatness, 40)) + 0.12)
     speech_like = active & ((flatness <= flatness_threshold) | (rms >= strong_threshold))
     return speech_like, frame_samples, hop_samples
+
+
+def detect_greeting_onset_artifact(text: str, wav: np.ndarray, sr: int) -> Dict[str, float]:
+    audio = _normalize_audio(wav)
+    default = {
+        "artifact": 0,
+        "checked": 0,
+        "start_ms": -1,
+        "mean_rms": 0.0,
+        "head_to_mid_rms_ratio": 0.0,
+        "mean_flatness": 0.0,
+        "flatness_cv": 0.0,
+        "rms_cv": 0.0,
+        "centroid_std": 0.0,
+    }
+    if not GREETING_ONSET_ARTIFACT_CHECK:
+        return default
+    if not isinstance(text, str) or not _H_GREETING_RE.match(text):
+        return default
+    if audio.size < max(1, int(sr * 0.22)):
+        return default
+
+    speech_like, frame_samples, hop_samples = _speech_frame_mask(audio, sr=int(sr), frame_ms=20, hop_ms=10)
+    start_frame = _find_active_run_start(speech_like, min_run=3) if speech_like.size else None
+    start_ms = -1 if start_frame is None else int(round(start_frame * hop_samples * 1000.0 / sr))
+
+    inspect = audio[: min(audio.shape[0], int(sr * 0.35))]
+    if inspect.size < max(1, int(sr * 0.22)):
+        return {**default, "checked": 1, "start_ms": start_ms}
+
+    rms = _rms_envelope(inspect, frame_samples=frame_samples, hop_samples=hop_samples)
+    flatness = _spectral_flatness_envelope(inspect, frame_samples=frame_samples, hop_samples=hop_samples)
+    centroid = _spectral_centroid_envelope(inspect, sr=int(sr), frame_samples=frame_samples, hop_samples=hop_samples)
+    min_len = min(rms.size, flatness.size, centroid.size)
+    if min_len < 6:
+        return {**default, "checked": 1, "start_ms": start_ms}
+    rms = rms[:min_len]
+    flatness = flatness[:min_len]
+    centroid = centroid[:min_len]
+
+    head = inspect[: max(1, int(sr * 0.08))]
+    mid_start = int(sr * 0.08)
+    mid_end = min(inspect.shape[0], int(sr * 0.22))
+    mid = inspect[mid_start:mid_end]
+    head_rms = float(np.sqrt(np.mean(np.square(head)) + 1e-12)) if head.size else 0.0
+    mid_rms = float(np.sqrt(np.mean(np.square(mid)) + 1e-12)) if mid.size else 0.0
+    mean_rms = float(np.mean(rms))
+    mean_flatness = float(np.mean(flatness))
+    rms_cv = float(np.std(rms) / (mean_rms + 1e-8))
+    flatness_cv = float(np.std(flatness) / (mean_flatness + 1e-8)) if mean_flatness > 1e-8 else 0.0
+    centroid_std = float(np.std(centroid))
+    ratio = head_rms / max(mid_rms, 1e-6)
+
+    artifact = int(
+        mean_rms > 0.025
+        and ratio > 0.75
+        and mean_flatness < 0.18
+        and rms_cv < 0.22
+        and flatness_cv < 0.5
+        and centroid_std < 220.0
+    )
+    return {
+        "artifact": artifact,
+        "checked": 1,
+        "start_ms": start_ms,
+        "mean_rms": mean_rms,
+        "head_to_mid_rms_ratio": ratio,
+        "mean_flatness": mean_flatness,
+        "flatness_cv": flatness_cv,
+        "rms_cv": rms_cv,
+        "centroid_std": centroid_std,
+    }
+
+
+def detect_greeting_leading_preroll_artifact(text: str, wav: np.ndarray, sr: int) -> Dict[str, float]:
+    audio = _normalize_audio(wav)
+    default = {
+        "artifact": 0,
+        "checked": 0,
+        "speech_start_ms": -1,
+        "strong_start_ms": -1,
+        "preroll_ms": 0,
+        "strong_threshold": 0.0,
+        "leading_mean_rms": 0.0,
+        "leading_p95_rms": 0.0,
+        "leading_speech_ratio": 0.0,
+        "preroll_mean_rms": 0.0,
+        "preroll_p95_rms": 0.0,
+        "preroll_speech_ratio": 0.0,
+        "global_p95_rms": 0.0,
+        "leading_to_global_ratio": 0.0,
+        "preroll_to_global_ratio": 0.0,
+    }
+    if not GREETING_ONSET_ARTIFACT_CHECK:
+        return default
+    if not isinstance(text, str) or not _H_GREETING_RE.match(text):
+        return default
+    if audio.size < max(1, int(sr * 1.5)):
+        return default
+
+    speech_like, frame_samples, hop_samples = _speech_frame_mask(audio, sr=int(sr), frame_ms=20, hop_ms=10)
+    if speech_like.size == 0:
+        return default
+
+    rms = _rms_envelope(audio, frame_samples=frame_samples, hop_samples=hop_samples)
+    min_len = min(rms.size, speech_like.size)
+    if min_len < 12:
+        return {**default, "checked": 1}
+    rms = rms[:min_len]
+    speech_like = speech_like[:min_len]
+
+    speech_start_frame = _find_active_run_start(speech_like, min_run=3)
+    speech_start_ms = -1 if speech_start_frame is None else int(round(speech_start_frame * hop_samples * 1000.0 / sr))
+    if speech_start_frame is None:
+        return {**default, "checked": 1, "speech_start_ms": speech_start_ms}
+
+    global_p90 = float(np.percentile(rms, 90))
+    global_p95 = float(np.percentile(rms, 95))
+    global_p98 = float(np.percentile(rms, 98))
+    strong_threshold = max(0.018, global_p90 * 0.45, global_p95 * 0.33, global_p98 * 0.28)
+    strong_mask = speech_like & (rms >= strong_threshold)
+    strong_start_frame = _find_active_run_start(strong_mask, min_run=8)
+    strong_start_ms = -1 if strong_start_frame is None else int(round(strong_start_frame * hop_samples * 1000.0 / sr))
+    if strong_start_frame is None:
+        return {
+            **default,
+            "checked": 1,
+            "speech_start_ms": speech_start_ms,
+            "strong_start_ms": strong_start_ms,
+            "strong_threshold": strong_threshold,
+            "global_p95_rms": global_p95,
+        }
+
+    leading = rms[:strong_start_frame]
+    leading_mean = float(np.mean(leading)) if leading.size else 0.0
+    leading_p95 = float(np.percentile(leading, 95)) if leading.size else 0.0
+    leading_speech_ratio = float(np.mean(speech_like[:strong_start_frame])) if strong_start_frame > 0 else 0.0
+    leading_to_global_ratio = leading_p95 / max(global_p95, 1e-6)
+    if strong_start_frame <= speech_start_frame:
+        delayed_strong_start = bool(
+            strong_start_ms >= 1800
+            and leading.size >= 80
+            and leading_speech_ratio <= 0.20
+            and leading_mean <= strong_threshold * 0.55
+            and leading_p95 <= strong_threshold * 0.85
+            and leading_to_global_ratio <= 0.40
+        )
+        return {
+            **default,
+            "artifact": int(delayed_strong_start),
+            "checked": 1,
+            "speech_start_ms": speech_start_ms,
+            "strong_start_ms": strong_start_ms,
+            "strong_threshold": strong_threshold,
+            "leading_mean_rms": leading_mean,
+            "leading_p95_rms": leading_p95,
+            "leading_speech_ratio": leading_speech_ratio,
+            "global_p95_rms": global_p95,
+            "leading_to_global_ratio": leading_to_global_ratio,
+        }
+
+    preroll = rms[speech_start_frame:strong_start_frame]
+    if preroll.size == 0:
+        return {
+            **default,
+            "checked": 1,
+            "speech_start_ms": speech_start_ms,
+            "strong_start_ms": strong_start_ms,
+            "strong_threshold": strong_threshold,
+            "leading_mean_rms": leading_mean,
+            "leading_p95_rms": leading_p95,
+            "leading_speech_ratio": leading_speech_ratio,
+            "global_p95_rms": global_p95,
+            "leading_to_global_ratio": leading_to_global_ratio,
+        }
+
+    preroll_ms = int(round((strong_start_frame - speech_start_frame) * hop_samples * 1000.0 / sr))
+    preroll_mean = float(np.mean(preroll))
+    preroll_p95 = float(np.percentile(preroll, 95))
+    preroll_speech_ratio = float(np.mean(speech_like[speech_start_frame:strong_start_frame]))
+    preroll_to_global_ratio = preroll_p95 / max(global_p95, 1e-6)
+    delayed_strong_start = bool(
+        strong_start_ms >= 1800
+        and leading.size >= 80
+        and leading_speech_ratio <= 0.20
+        and leading_mean <= strong_threshold * 0.55
+        and leading_p95 <= strong_threshold * 0.85
+        and leading_to_global_ratio <= 0.40
+    )
+    low_energy_speech_preroll = bool(
+        preroll_ms >= 1200
+        and preroll.size >= 40
+        and preroll_speech_ratio <= 0.35
+        and preroll_mean <= strong_threshold * 0.55
+        and preroll_p95 <= strong_threshold * 0.80
+        and preroll_to_global_ratio <= 0.40
+    )
+    artifact = int(delayed_strong_start or low_energy_speech_preroll)
+    return {
+        "artifact": artifact,
+        "checked": 1,
+        "speech_start_ms": speech_start_ms,
+        "strong_start_ms": strong_start_ms,
+        "preroll_ms": preroll_ms,
+        "strong_threshold": strong_threshold,
+        "leading_mean_rms": leading_mean,
+        "leading_p95_rms": leading_p95,
+        "leading_speech_ratio": leading_speech_ratio,
+        "preroll_mean_rms": preroll_mean,
+        "preroll_p95_rms": preroll_p95,
+        "preroll_speech_ratio": preroll_speech_ratio,
+        "global_p95_rms": global_p95,
+        "leading_to_global_ratio": leading_to_global_ratio,
+        "preroll_to_global_ratio": preroll_to_global_ratio,
+    }
 
 
 def _find_active_run_start(active: np.ndarray, min_run: int) -> Optional[int]:

@@ -4,7 +4,15 @@ import traceback
 from typing import Any, Dict
 
 from .cache_utils import prompt_fingerprint
-from .config import MAX_RETRIES, RETRY_BASE_SECONDS, S3_PREFIX
+from .config import (
+    GREETING_ONSET_ARTIFACT_REQUIRE_PASS,
+    GREETING_SPEAKER_SIMILARITY_MAX_ATTEMPTS,
+    GREETING_SPEAKER_SIMILARITY_REQUIRE_PASS,
+    GREETING_SPEAKER_SIMILARITY_THRESHOLD,
+    MAX_RETRIES,
+    RETRY_BASE_SECONDS,
+    S3_PREFIX,
+)
 from .db import TaskDB
 from qwen_tts import VoiceClonePromptItem
 
@@ -23,6 +31,7 @@ from .tts import (
     clean_reference_audio,
     create_voice_prompt,
     generate_voice,
+    generate_voice_with_similarity_retry,
     load_audio,
     write_wav_temp,
 )
@@ -156,8 +165,47 @@ class Worker:
             )
         ]
 
-        wav, sr = generate_voice(text, voice_prompt)
-        wav, sr, output_trim = clean_output_audio(wav, sr)
+        greeting_similarity = None
+        greeting_attempts = 1
+        greeting_similarity_passed = None
+        greeting_quality = {
+            "similarity_passed": 0,
+            "onset_artifact": 0,
+            "onset_checked": 0,
+            "onset_passed": 1,
+            "preroll_artifact": 0,
+            "preroll_checked": 0,
+            "preroll_passed": 1,
+            "start_passed": 1,
+        }
+        if isinstance(text, str) and text.strip().lower().startswith(("hi ", "hi,", "hello ", "hello,")):
+            (
+                wav,
+                sr,
+                greeting_similarity,
+                greeting_attempts,
+                greeting_similarity_passed,
+                greeting_quality,
+            ) = generate_voice_with_similarity_retry(
+                text=text,
+                voice_prompt=voice_prompt,
+                reference_embedding=prompt_data["ref_spk_embedding"],
+                min_similarity=GREETING_SPEAKER_SIMILARITY_THRESHOLD,
+                max_attempts=GREETING_SPEAKER_SIMILARITY_MAX_ATTEMPTS,
+            )
+            if GREETING_SPEAKER_SIMILARITY_REQUIRE_PASS and not greeting_similarity_passed:
+                raise RuntimeError(
+                    "phrase greeting speaker similarity below threshold: "
+                    f"{greeting_similarity:.4f} < {GREETING_SPEAKER_SIMILARITY_THRESHOLD:.4f}"
+                )
+            if GREETING_ONSET_ARTIFACT_REQUIRE_PASS and not greeting_quality.get("start_passed", 1):
+                raise RuntimeError("phrase greeting start artifact detected in all attempts")
+        else:
+            wav, sr = generate_voice(text, voice_prompt)
+            wav, sr, output_trim = clean_output_audio(wav, sr)
+
+        if "output_trim" not in locals():
+            wav, sr, output_trim = clean_output_audio(wav, sr)
         tmp_path = write_wav_temp(wav, sr)
         upload_file(phrase_paths["audio"], tmp_path, "audio/wav")
         public_url = create_presigned_url(phrase_paths["audio"], expires_seconds=60 * 24 * 3600)
@@ -170,6 +218,16 @@ class Worker:
             "status": "done",
             "result_key": phrase_paths["audio"],
             "public_url": public_url,
+            "greeting_similarity": greeting_similarity,
+            "greeting_attempts": greeting_attempts,
+            "greeting_similarity_passed": greeting_similarity_passed,
+            "greeting_onset_checked": bool(greeting_quality.get("onset_checked", 0)),
+            "greeting_onset_passed": bool(greeting_quality.get("onset_passed", 1)),
+            "greeting_onset_artifact": bool(greeting_quality.get("onset_artifact", 0)),
+            "greeting_preroll_checked": bool(greeting_quality.get("preroll_checked", 0)),
+            "greeting_preroll_passed": bool(greeting_quality.get("preroll_passed", 1)),
+            "greeting_preroll_artifact": bool(greeting_quality.get("preroll_artifact", 0)),
+            "greeting_start_passed": bool(greeting_quality.get("start_passed", 1)),
             "output_trim": output_trim,
             "updated_at": int(time.time()),
         }

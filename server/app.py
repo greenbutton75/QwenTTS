@@ -13,6 +13,7 @@ from qwen_tts import VoiceClonePromptItem
 from .config import ADMIN_PASSWORD, ADMIN_USER, LANGUAGE, MODEL_SIZE, S3_PREFIX, SQLITE_PATH
 from .config import voice_clone_generate_config
 from .config import (
+    GREETING_ONSET_ARTIFACT_REQUIRE_PASS,
     GREETING_SPEAKER_SIMILARITY_CHECK,
     GREETING_SPEAKER_SIMILARITY_MAX_ATTEMPTS,
     GREETING_SPEAKER_SIMILARITY_REQUIRE_PASS,
@@ -182,8 +183,18 @@ def _synthesize_spliced_phrase(
     greeting_similarity = None
     greeting_attempts = 1
     greeting_similarity_passed = None
+    greeting_quality = {
+        "similarity_passed": 0,
+        "onset_artifact": 0,
+        "onset_checked": 0,
+        "onset_passed": 1,
+        "preroll_artifact": 0,
+        "preroll_checked": 0,
+        "preroll_passed": 1,
+        "start_passed": 1,
+    }
     if GREETING_SPEAKER_SIMILARITY_CHECK:
-        greeting_wav, sr_greeting, greeting_similarity, greeting_attempts, greeting_similarity_passed = (
+        greeting_wav, sr_greeting, greeting_similarity, greeting_attempts, greeting_similarity_passed, greeting_quality = (
             generate_voice_with_similarity_retry(
                 text=greeting,
                 voice_prompt=voice_prompt,
@@ -200,6 +211,8 @@ def _synthesize_spliced_phrase(
                     f"{greeting_similarity:.4f} < {GREETING_SPEAKER_SIMILARITY_THRESHOLD:.4f}"
                 ),
             )
+        if GREETING_ONSET_ARTIFACT_REQUIRE_PASS and not greeting_quality.get("start_passed", 1):
+            raise HTTPException(status_code=422, detail="greeting start artifact detected in all attempts")
     else:
         greeting_wav, sr_greeting = generate_voice(greeting, voice_prompt)
         greeting_wav, sr_greeting, _ = clean_output_audio(greeting_wav, sr_greeting)
@@ -253,6 +266,7 @@ def _synthesize_spliced_phrase(
         greeting_similarity,
         greeting_attempts,
         greeting_similarity_passed,
+        greeting_quality,
         output_trim,
     )
 
@@ -449,6 +463,7 @@ def splice_test_phrase(req: SpliceTestRequest) -> Response:
         greeting_similarity,
         greeting_attempts,
         greeting_similarity_passed,
+        greeting_quality,
         output_trim,
     ) = _synthesize_spliced_phrase(
         support_id=req.support_id,
@@ -474,6 +489,13 @@ def splice_test_phrase(req: SpliceTestRequest) -> Response:
             "X-Greeting-Similarity": "" if greeting_similarity is None else f"{greeting_similarity:.4f}",
             "X-Greeting-Attempts": str(greeting_attempts),
             "X-Greeting-Similarity-Passed": "" if greeting_similarity_passed is None else str(bool(greeting_similarity_passed)).lower(),
+            "X-Greeting-Onset-Checked": str(bool(greeting_quality.get("onset_checked", 0))).lower(),
+            "X-Greeting-Onset-Passed": str(bool(greeting_quality.get("onset_passed", 1))).lower(),
+            "X-Greeting-Onset-Artifact": str(bool(greeting_quality.get("onset_artifact", 0))).lower(),
+            "X-Greeting-Preroll-Checked": str(bool(greeting_quality.get("preroll_checked", 0))).lower(),
+            "X-Greeting-Preroll-Passed": str(bool(greeting_quality.get("preroll_passed", 1))).lower(),
+            "X-Greeting-Preroll-Artifact": str(bool(greeting_quality.get("preroll_artifact", 0))).lower(),
+            "X-Greeting-Start-Passed": str(bool(greeting_quality.get("start_passed", 1))).lower(),
             "X-Output-Trim-Leading-Ms": str(output_trim["leading_ms"]),
             "X-Output-Trim-Trailing-Ms": str(output_trim["trailing_ms"]),
             "X-Output-Trim-Applied": str(bool(output_trim["trimmed"])).lower(),
@@ -522,6 +544,7 @@ def create_phrase_splice_prod(req: CreateSplicePhraseRequest) -> CreatePhraseRes
             greeting_similarity,
             greeting_attempts,
             greeting_similarity_passed,
+            greeting_quality,
             output_trim,
         ) = _synthesize_spliced_phrase(
             support_id=req.support_id,
@@ -550,6 +573,13 @@ def create_phrase_splice_prod(req: CreateSplicePhraseRequest) -> CreatePhraseRes
                 "greeting_similarity": greeting_similarity,
                 "greeting_attempts": greeting_attempts,
                 "greeting_similarity_passed": greeting_similarity_passed,
+                "greeting_onset_checked": bool(greeting_quality.get("onset_checked", 0)),
+                "greeting_onset_passed": bool(greeting_quality.get("onset_passed", 1)),
+                "greeting_onset_artifact": bool(greeting_quality.get("onset_artifact", 0)),
+                "greeting_preroll_checked": bool(greeting_quality.get("preroll_checked", 0)),
+                "greeting_preroll_passed": bool(greeting_quality.get("preroll_passed", 1)),
+                "greeting_preroll_artifact": bool(greeting_quality.get("preroll_artifact", 0)),
+                "greeting_start_passed": bool(greeting_quality.get("start_passed", 1)),
                 "output_trim": output_trim,
                 "updated_at": int(time.time()),
             },
