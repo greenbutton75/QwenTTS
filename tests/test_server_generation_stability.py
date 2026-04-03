@@ -178,6 +178,31 @@ class ServerGenerationStabilityTests(unittest.TestCase):
         self.assertEqual(sr, 24000)
         self.assertEqual(stats["trimmed"], 0)
 
+    def test_clean_output_audio_removes_multi_second_leading_silence(self) -> None:
+        silence = np.zeros(24000 * 7, dtype=np.float32)
+        voice = np.full(4800, 0.2, dtype=np.float32)
+        wav = np.concatenate([silence, voice])
+
+        cleaned, sr, stats = server_tts.clean_output_audio(wav, 24000)
+
+        self.assertEqual(sr, 24000)
+        self.assertLess(cleaned.shape[0], wav.shape[0] // 3)
+        self.assertGreaterEqual(stats["leading_ms"], 6500)
+        self.assertEqual(stats["trimmed"], 1)
+
+    def test_clean_output_audio_compacts_long_internal_silence(self) -> None:
+        voice_a = np.full(4800, 0.2, dtype=np.float32)
+        silence = np.zeros(24000 * 5, dtype=np.float32)
+        voice_b = np.full(4800, 0.2, dtype=np.float32)
+        wav = np.concatenate([voice_a, silence, voice_b])
+
+        cleaned, sr, stats = server_tts.clean_output_audio(wav, 24000)
+
+        self.assertEqual(sr, 24000)
+        self.assertLess(cleaned.shape[0], wav.shape[0] - (24000 * 3))
+        self.assertEqual(stats["internal_silence_compressed"], 1)
+        self.assertGreaterEqual(stats["internal_silence_removed_ms"], 3500)
+
 
 if __name__ == "__main__":
     unittest.main()

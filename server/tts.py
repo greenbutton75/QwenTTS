@@ -11,6 +11,7 @@ from qwen_tts import Qwen3TTSModel, VoiceClonePromptItem
 
 from .config import (
     LANGUAGE,
+    OUTPUT_AUDIO_MAX_INTERNAL_SILENCE_MS,
     MODEL_SIZE,
     OUTPUT_AUDIO_TRIM_ENABLED,
     OUTPUT_AUDIO_TRIM_MAX_LEADING_MS,
@@ -265,6 +266,33 @@ def _adaptive_vad_threshold(rms: np.ndarray) -> float:
     return max(1e-5, base + 0.2 * max(0.0, high - base))
 
 
+def _speech_frame_mask(
+    signal: np.ndarray,
+    sr: int,
+    frame_ms: int = 20,
+    hop_ms: int = 10,
+) -> Tuple[np.ndarray, int, int]:
+    frame_samples = max(1, int(sr * frame_ms / 1000.0))
+    hop_samples = max(1, int(sr * hop_ms / 1000.0))
+    rms = _rms_envelope(signal, frame_samples=frame_samples, hop_samples=hop_samples)
+    flatness = _spectral_flatness_envelope(signal, frame_samples=frame_samples, hop_samples=hop_samples)
+    if rms.size == 0 or flatness.size == 0:
+        return np.zeros((0,), dtype=bool), frame_samples, hop_samples
+    if flatness.size != rms.size:
+        min_len = min(rms.size, flatness.size)
+        rms = rms[:min_len]
+        flatness = flatness[:min_len]
+    if rms.size == 0:
+        return np.zeros((0,), dtype=bool), frame_samples, hop_samples
+
+    threshold = _adaptive_vad_threshold(rms)
+    active = rms > threshold
+    strong_threshold = max(threshold * 2.5, threshold + 1e-4)
+    flatness_threshold = min(0.5, float(np.percentile(flatness, 40)) + 0.12)
+    speech_like = active & ((flatness <= flatness_threshold) | (rms >= strong_threshold))
+    return speech_like, frame_samples, hop_samples
+
+
 def _find_active_run_start(active: np.ndarray, min_run: int) -> Optional[int]:
     run = 0
     for idx, value in enumerate(active):
@@ -307,10 +335,13 @@ def trim_audio_edges(
             "cleaned_ms": 0,
         }
 
-    frame_samples = max(1, int(sr * frame_ms / 1000.0))
-    hop_samples = max(1, int(sr * hop_ms / 1000.0))
-    rms = _rms_envelope(audio, frame_samples=frame_samples, hop_samples=hop_samples)
-    if rms.size == 0:
+    speech_like, frame_samples, hop_samples = _speech_frame_mask(
+        audio,
+        sr=int(sr),
+        frame_ms=frame_ms,
+        hop_ms=hop_ms,
+    )
+    if speech_like.size == 0:
         return audio, {
             "trimmed": 0,
             "leading_ms": 0,
@@ -319,31 +350,8 @@ def trim_audio_edges(
             "cleaned_ms": int(round(total_samples * 1000.0 / sr)),
         }
 
-    flatness = _spectral_flatness_envelope(audio, frame_samples=frame_samples, hop_samples=hop_samples)
-    if flatness.size != rms.size:
-        min_len = min(rms.size, flatness.size)
-        rms = rms[:min_len]
-        flatness = flatness[:min_len]
-        if min_len == 0:
-            return audio, {
-                "trimmed": 0,
-                "leading_ms": 0,
-                "trailing_ms": 0,
-                "original_ms": int(round(total_samples * 1000.0 / sr)),
-                "cleaned_ms": int(round(total_samples * 1000.0 / sr)),
-            }
-
-    threshold = _adaptive_vad_threshold(rms)
-    active = rms > threshold
-    strong_threshold = max(threshold * 2.5, threshold + 1e-4)
-    flatness_threshold = min(0.5, float(np.percentile(flatness, 40)) + 0.12)
-    speech_like = active & ((flatness <= flatness_threshold) | (rms >= strong_threshold))
-
     start_frame = _find_active_run_start(speech_like, min_run=min_run_frames)
     end_frame = _find_active_run_end(speech_like, min_run=min_run_frames)
-    if start_frame is None or end_frame is None:
-        start_frame = _find_active_run_start(active, min_run=min_run_frames)
-        end_frame = _find_active_run_end(active, min_run=min_run_frames)
     if start_frame is None or end_frame is None:
         return audio, {
             "trimmed": 0,
@@ -381,6 +389,102 @@ def trim_audio_edges(
     }
 
 
+def compact_internal_silences(
+    wav: np.ndarray,
+    sr: int,
+    max_internal_silence_ms: int,
+    frame_ms: int = 20,
+    hop_ms: int = 10,
+    min_run_frames: int = 3,
+) -> Tuple[np.ndarray, Dict[str, int]]:
+    audio = _normalize_audio(wav)
+    total_samples = int(audio.shape[0])
+    keep_samples = max(0, int(sr * max_internal_silence_ms / 1000.0))
+    if total_samples == 0 or keep_samples <= 0:
+        return audio, {
+            "compressed": 0,
+            "spans": 0,
+            "removed_ms": 0,
+            "original_ms": int(round(total_samples * 1000.0 / sr)) if sr else 0,
+            "cleaned_ms": int(round(total_samples * 1000.0 / sr)) if sr else 0,
+        }
+
+    speech_like, frame_samples, hop_samples = _speech_frame_mask(
+        audio,
+        sr=int(sr),
+        frame_ms=frame_ms,
+        hop_ms=hop_ms,
+    )
+    if speech_like.size == 0:
+        return audio, {
+            "compressed": 0,
+            "spans": 0,
+            "removed_ms": 0,
+            "original_ms": int(round(total_samples * 1000.0 / sr)),
+            "cleaned_ms": int(round(total_samples * 1000.0 / sr)),
+        }
+
+    speech_run_start = _find_active_run_start(speech_like, min_run=min_run_frames)
+    speech_run_end = _find_active_run_end(speech_like, min_run=min_run_frames)
+    if speech_run_start is None or speech_run_end is None or speech_run_end <= speech_run_start:
+        return audio, {
+            "compressed": 0,
+            "spans": 0,
+            "removed_ms": 0,
+            "original_ms": int(round(total_samples * 1000.0 / sr)),
+            "cleaned_ms": int(round(total_samples * 1000.0 / sr)),
+        }
+
+    parts = []
+    cursor = 0
+    removed_samples = 0
+    compressed_spans = 0
+    in_silence = False
+    silence_start = 0
+
+    for idx in range(speech_run_start, speech_run_end + 1):
+        is_speech = bool(speech_like[idx])
+        if not is_speech and not in_silence:
+            in_silence = True
+            silence_start = idx
+            continue
+        if is_speech and in_silence:
+            in_silence = False
+            run_start = silence_start
+            run_end = idx - 1
+            silence_sample_start = max(0, run_start * hop_samples)
+            silence_sample_end = min(total_samples, run_end * hop_samples + frame_samples)
+            silence_len = max(0, silence_sample_end - silence_sample_start)
+            if silence_len > keep_samples:
+                left_keep = keep_samples // 2
+                right_keep = keep_samples - left_keep
+                remove_start = silence_sample_start + left_keep
+                remove_end = silence_sample_end - right_keep
+                if remove_end > remove_start:
+                    parts.append(audio[cursor:remove_start])
+                    cursor = remove_end
+                    removed_samples += remove_end - remove_start
+                    compressed_spans += 1
+    if cursor == 0:
+        return audio, {
+            "compressed": 0,
+            "spans": 0,
+            "removed_ms": 0,
+            "original_ms": int(round(total_samples * 1000.0 / sr)),
+            "cleaned_ms": int(round(total_samples * 1000.0 / sr)),
+        }
+
+    parts.append(audio[cursor:])
+    compacted = np.concatenate(parts, axis=0) if len(parts) > 1 else parts[0]
+    return compacted.astype(np.float32), {
+        "compressed": int(compressed_spans > 0),
+        "spans": int(compressed_spans),
+        "removed_ms": int(round(removed_samples * 1000.0 / sr)),
+        "original_ms": int(round(total_samples * 1000.0 / sr)),
+        "cleaned_ms": int(round(compacted.shape[0] * 1000.0 / sr)),
+    }
+
+
 def clean_reference_audio(wav: np.ndarray, sr: int) -> Tuple[np.ndarray, int, Dict[str, int]]:
     audio = _normalize_audio(wav)
     if not REFERENCE_AUDIO_TRIM_ENABLED:
@@ -409,18 +513,33 @@ def clean_output_audio(wav: np.ndarray, sr: int) -> Tuple[np.ndarray, int, Dict[
             "trimmed": 0,
             "leading_ms": 0,
             "trailing_ms": 0,
+            "internal_silence_compressed": 0,
+            "internal_silence_spans": 0,
+            "internal_silence_removed_ms": 0,
             "original_ms": int(round(audio.shape[0] * 1000.0 / sr)) if sr else 0,
             "cleaned_ms": int(round(audio.shape[0] * 1000.0 / sr)) if sr else 0,
         }
         return audio, int(sr), stats
-    cleaned, stats = trim_audio_edges(
+
+    edge_cleaned, edge_stats = trim_audio_edges(
         audio,
         sr=int(sr),
         pad_ms=OUTPUT_AUDIO_TRIM_PAD_MS,
         max_leading_ms=OUTPUT_AUDIO_TRIM_MAX_LEADING_MS,
         max_trailing_ms=OUTPUT_AUDIO_TRIM_MAX_TRAILING_MS,
     )
-    return cleaned, int(sr), stats
+    compacted, silence_stats = compact_internal_silences(
+        edge_cleaned,
+        sr=int(sr),
+        max_internal_silence_ms=OUTPUT_AUDIO_MAX_INTERNAL_SILENCE_MS,
+    )
+    stats = dict(edge_stats)
+    stats["trimmed"] = int(bool(edge_stats.get("trimmed")) or bool(silence_stats.get("compressed")))
+    stats["internal_silence_compressed"] = int(silence_stats["compressed"])
+    stats["internal_silence_spans"] = int(silence_stats["spans"])
+    stats["internal_silence_removed_ms"] = int(silence_stats["removed_ms"])
+    stats["cleaned_ms"] = int(round(compacted.shape[0] * 1000.0 / sr)) if sr else 0
+    return compacted, int(sr), stats
 
 
 def _find_boundary_sample(
@@ -434,16 +553,13 @@ def _find_boundary_sample(
     if signal.size == 0:
         return 0
 
-    frame_samples = max(1, int(sr * frame_ms / 1000.0))
-    hop_samples = max(1, int(sr * hop_ms / 1000.0))
-    rms = _rms_envelope(signal, frame_samples=frame_samples, hop_samples=hop_samples)
-    thr = _adaptive_vad_threshold(rms)
-    flatness = _spectral_flatness_envelope(signal, frame_samples=frame_samples, hop_samples=hop_samples)
-    if flatness.size != rms.size:
-        min_len = min(rms.size, flatness.size)
-        rms = rms[:min_len]
-        flatness = flatness[:min_len]
-    low_mask = (rms <= thr) | (flatness >= 0.6)
+    speech_like, frame_samples, hop_samples = _speech_frame_mask(
+        signal,
+        sr=int(sr),
+        frame_ms=frame_ms,
+        hop_ms=hop_ms,
+    )
+    low_mask = ~speech_like
 
     search_samples = max(1, int(sr * window_ms / 1000.0))
     frames_in_window = max(1, search_samples // hop_samples)
