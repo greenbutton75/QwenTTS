@@ -140,6 +140,11 @@ The server-side output cleanup was extended to handle real production failures:
   - fatal CUDA errors kill the API process so `run_api.sh` can restart it cleanly
   - local API queue items stuck in `running` are recovered back to `queued` on startup
   - retryable Qwen API / CUDA failures are bubbled up for retry instead of immediately failing the remote task
+- the greeting over-trim regression was fixed:
+  - root cause was double leading trim on `Hi` / `Hello` outputs
+  - accepted retry candidates are no longer pre-trimmed before final cleanup
+  - greeting/full-phrase paths now preserve more leading context with a larger pad
+  - final merged splice cleanup no longer trims the start a second time
 - affects both full-phrase and splice generation paths because the cleanup lives in the shared server audio postprocess
 
 New relevant env:
@@ -149,6 +154,7 @@ OUTPUT_AUDIO_TRIM_MAX_LEADING_MS=15000
 OUTPUT_AUDIO_TRIM_MAX_TRAILING_MS=2000
 OUTPUT_AUDIO_MAX_INTERNAL_SILENCE_MS=600
 OUTPUT_AUDIO_TRIM_ALGORITHM_VERSION=rms_flatness_pause_compact_v3
+GREETING_OUTPUT_TRIM_PAD_MS=160
 GREETING_ONSET_ARTIFACT_CHECK=true
 GREETING_ONSET_ARTIFACT_REQUIRE_PASS=true
 ```
@@ -160,6 +166,17 @@ Operational note:
 - phrase metadata now includes start-quality fields such as `greeting_onset_*`, `greeting_preroll_*`, and `greeting_start_passed`
 - after `CUDA error: device-side assert triggered`, do not trust same-process full fallback; the intended recovery path is API restart
 - tasks already completed as remote `failed` in async_task_manager must still be recreated manually
+- phrases generated during the short greeting over-trim regression window must be regenerated because the saved audio is already clipped
+
+## Health counter notes
+
+`task_worker` health counters are cumulative since worker start and are not final task statuses.
+
+- `splice_failures` means the splice path failed for a phrase attempt before fallback
+- `phrase_fallback_full` means worker switched that phrase to the full-phrase path
+- `phrase_failed` increases only when the final result for the phrase is actually failed
+
+So a state like `splice_failures > 0`, `phrase_fallback_full > 0`, `phrase_failed = 0` is valid and means fallback recovered successfully.
 
 ## Resilience
 

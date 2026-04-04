@@ -481,6 +481,11 @@ See `docs/watchdog.md` for configuration, recovery logic, and required env overr
   - при таком сбое API-процесс завершается сам, а `scripts/run_api.sh` поднимает его заново;
   - локальная sqlite-очередь API на старте переводит зависшие `running` обратно в `queued`;
   - `task_worker` не помечает remote task как окончательно failed при retryable Qwen API / CUDA-сбоях, а даёт системе шанс на повтор после рестарта API.
+- Исправлена регрессия с обрезанием начала greeting после вчерашних изменений:
+  - причина была в двойном leading trim для `Hi` / `Hello` фраз;
+  - `generate_voice_with_similarity_retry()` больше не делает pre-trim кандидата;
+  - для greeting/full-phrase с `Hi` / `Hello` используется более щадящий стартовый pad;
+  - финальная cleanup после splice больше не режет leading edge повторно.
 
 Новые/важные env для контроля поведения:
 
@@ -491,6 +496,7 @@ OUTPUT_AUDIO_TRIM_MAX_LEADING_MS=15000
 OUTPUT_AUDIO_TRIM_MAX_TRAILING_MS=2000
 OUTPUT_AUDIO_MAX_INTERNAL_SILENCE_MS=600
 OUTPUT_AUDIO_TRIM_ALGORITHM_VERSION=rms_flatness_pause_compact_v3
+GREETING_OUTPUT_TRIM_PAD_MS=160
 GREETING_ONSET_ARTIFACT_CHECK=true
 GREETING_ONSET_ARTIFACT_REQUIRE_PASS=true
 ```
@@ -503,6 +509,7 @@ GREETING_ONSET_ARTIFACT_REQUIRE_PASS=true
 - при `CUDA error: device-side assert triggered` теперь нормальная стратегия не full fallback в том же умирающем процессе, а авто-рестарт API;
 - после такого рестарта зависшие локальные задачи API должны сами вернуться в `queued`;
 - уже завершённые как `failed` remote tasks в async_task_manager автоматически не оживают, их нужно пересоздать отдельно.
+- после выката фикса `Preserve greeting starts during output cleanup` нужно перегенерировать фразы из окна регрессии, где начало greeting уже было обрезано.
 
 ## Возможности
 

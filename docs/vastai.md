@@ -297,6 +297,11 @@ Production audio postprocess was strengthened after real cases with multi-second
   - `scripts/run_api.sh` then restarts uvicorn automatically
   - stale local API queue items with status `running` are moved back to `queued` on startup
   - `task_worker` treats retryable Qwen API / CUDA failures as retryable instead of final task failures
+- the over-trim regression on greeting starts was fixed:
+  - the bug came from double leading trim on `Hi` / `Hello` phrases
+  - retry candidate generation no longer pre-trims accepted greeting audio
+  - greeting/full-phrase paths now use a larger leading pad to preserve soft speech onset
+  - final merged splice cleanup no longer re-trims the leading edge
 - cleanup now applies to:
   - full phrase generation,
   - splice greeting,
@@ -309,6 +314,7 @@ Production audio postprocess was strengthened after real cases with multi-second
 Relevant greeting-start env:
 
 ```bash
+GREETING_OUTPUT_TRIM_PAD_MS=160
 GREETING_ONSET_ARTIFACT_CHECK=true
 GREETING_ONSET_ARTIFACT_REQUIRE_PASS=true
 ```
@@ -320,6 +326,7 @@ Operational note:
 - if all greeting attempts still produce a bad start, the service now fails the candidate instead of returning a broken WAV
 - after a fatal CUDA crash, the recommended path is to let `run_api.sh` restart the API instead of trying to reuse the poisoned CUDA context
 - remote tasks already marked as `failed` in async_task_manager still need to be recreated manually
+- phrases generated during the brief over-trim regression window must also be regenerated because the stored WAVs are already cut
 
 ## 8) Windows Watchdog
 
