@@ -32,6 +32,7 @@ from .tts import (
     create_voice_prompt,
     generate_voice,
     generate_voice_with_similarity_retry,
+    is_fatal_cuda_error,
     load_audio,
     write_wav_temp,
 )
@@ -86,6 +87,17 @@ class Worker:
                 attempts = task.attempts + 1
                 self.logger.error("Task failed: %s", exc)
                 self.logger.debug("Traceback:\n%s", traceback.format_exc())
+
+                if is_fatal_cuda_error(exc):
+                    try:
+                        self.db.requeue_with_backoff(task.task_id, attempts, 5)
+                    finally:
+                        self.logger.critical(
+                            "Fatal CUDA error in API worker task_id=%s type=%s. Exiting process for supervisor restart.",
+                            task.task_id,
+                            task.task_type,
+                        )
+                        os._exit(86)
 
                 self._update_status_on_failure(task.task_type, task.payload, str(exc), attempts)
 

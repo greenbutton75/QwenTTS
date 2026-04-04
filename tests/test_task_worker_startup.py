@@ -3,7 +3,7 @@ import os
 import sys
 import types
 import unittest
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 
 def _seed_env() -> None:
@@ -101,6 +101,17 @@ task_worker_module = importlib.import_module("task_worker.worker")
 
 
 class TaskWorkerStartupTests(unittest.TestCase):
+    def test_retryable_qwen_api_error_detects_cuda_and_connection_loss(self) -> None:
+        self.assertTrue(
+            task_worker_module._is_retryable_qwen_api_error("CUDA error: device-side assert triggered")
+        )
+        self.assertTrue(
+            task_worker_module._is_retryable_qwen_api_error("Connection refused")
+        )
+        self.assertFalse(
+            task_worker_module._is_retryable_qwen_api_error("greeting onset artifact detected in all attempts")
+        )
+
     def test_wait_for_qwen_tts_ready_retries_until_health_is_ok(self) -> None:
         state = task_worker_module.HealthState()
         with patch.object(
@@ -131,6 +142,37 @@ class TaskWorkerStartupTests(unittest.TestCase):
         self.assertEqual(err, "")
         self.assertEqual(splice_mock.call_args.kwargs["pause_ms"], 220)
         self.assertEqual(splice_mock.call_args.kwargs["crossfade_ms"], 10)
+
+    def test_process_phrases_batch_bubbles_retryable_splice_error_without_failing_task(self) -> None:
+        rec = {
+            "id": "1",
+            "taskParameters": {
+                "support_id": "72290",
+                "voice_id": "voice-1",
+                "phrase_id": "phrase-1",
+                "text": "Hi Kevin, this is Eugene from RiXtrema",
+            },
+        }
+        state = task_worker_module.HealthState()
+        state.inc_phrase_grouped = MagicMock()
+        state.inc_splice_failure = MagicMock()
+        state.inc_phrase_fallback_full = MagicMock()
+        state.mark_phrase_poll = MagicMock()
+
+        with patch.object(task_worker_module, "list_tasks", return_value=[rec, {**rec, "id": "2", "taskParameters": {**rec["taskParameters"], "phrase_id": "phrase-2"}}]), \
+             patch.object(task_worker_module, "task_id_from_record", side_effect=lambda item: str(item["id"])), \
+             patch.object(task_worker_module, "task_params_from_record", side_effect=lambda item: item["taskParameters"]), \
+             patch.object(task_worker_module, "_profile_ready_in_s3", return_value=True), \
+             patch.object(
+                 task_worker_module,
+                 "_submit_and_wait_splice_phrase",
+                 return_value=(False, "CUDA error: device-side assert triggered"),
+             ), \
+             patch.object(task_worker_module, "failed_task") as failed_mock:
+            with self.assertRaises(RuntimeError):
+                task_worker_module.process_phrases_batch(state)
+
+        failed_mock.assert_not_called()
 
 
 if __name__ == "__main__":

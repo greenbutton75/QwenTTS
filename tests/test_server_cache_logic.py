@@ -63,6 +63,7 @@ def _install_test_stubs() -> None:
         lambda text, voice_prompt, reference_embedding, min_similarity, max_attempts:
         (np.zeros(8, dtype=np.float32), 24000, 0.99, 1, True)
     )
+    fake_tts.is_fatal_cuda_error = lambda exc_or_text: False
     fake_tts.clean_output_audio = (
         lambda wav, sr: (
             wav,

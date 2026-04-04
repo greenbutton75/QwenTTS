@@ -42,6 +42,22 @@ GREETING_RE = re.compile(
     r"^\s*(hi|hello)(?:\s+[!,]?\s*|[!,]\s*)([a-zA-Z][a-zA-Z'\-]*)\s*([!,]?)\s*",
     re.IGNORECASE,
 )
+_RETRYABLE_QWEN_API_ERROR_MARKERS = (
+    "device-side assert triggered",
+    "cuda error",
+    "cublas",
+    "cudnn",
+    "illegal memory access",
+    "connection refused",
+    "connection aborted",
+    "connection reset by peer",
+    "failed to establish a new connection",
+    "remote end closed connection",
+    "max retries exceeded",
+    "502 server error",
+    "503 server error",
+    "504 server error",
+)
 
 
 def _sample_key(support_id: str, voice_id: str) -> str:
@@ -141,6 +157,11 @@ def _split_greeting_body(text: str) -> Optional[Tuple[str, str]]:
 def _use_splice_grouping_for_support(support_id: str) -> bool:
     _ = support_id
     return ENABLE_PHRASE_SPLICE_GROUPING
+
+
+def _is_retryable_qwen_api_error(exc_or_text: Any) -> bool:
+    text = str(exc_or_text or "").lower()
+    return any(marker in text for marker in _RETRYABLE_QWEN_API_ERROR_MARKERS)
 
 
 def _submit_and_wait_full_phrase(
@@ -310,6 +331,9 @@ def process_phrases_batch(state: HealthState) -> None:
                 if ok:
                     state.inc_phrase_splice_path()
                 else:
+                    if _is_retryable_qwen_api_error(err):
+                        state.inc_splice_failure()
+                        raise RuntimeError(f"retryable splice failure: {err}")
                     state.inc_splice_failure()
                     state.inc_phrase_fallback_full()
                     full_ok, full_err = _submit_and_wait_full_phrase(
@@ -321,6 +345,8 @@ def process_phrases_batch(state: HealthState) -> None:
                         state=state,
                     )
                     if not full_ok:
+                        if _is_retryable_qwen_api_error(full_err):
+                            raise RuntimeError(f"retryable full fallback failure: {full_err}")
                         failed_task(
                             item["task_id"],
                             error=f"splice failed: {err}; full fallback failed: {full_err}",
@@ -328,6 +354,14 @@ def process_phrases_batch(state: HealthState) -> None:
                         state.inc_phrase_failed()
             except Exception as exc:
                 state.inc_splice_failure()
+                if _is_retryable_qwen_api_error(exc):
+                    logger.warning(
+                        "splice path hit retryable Qwen API error for task_id=%s phrase_id=%s: %s",
+                        item["task_id"],
+                        item["phrase_id"],
+                        exc,
+                    )
+                    raise
                 logger.warning(
                     "splice path failed for task_id=%s phrase_id=%s, fallback to full phrase: %s",
                     item["task_id"],
@@ -345,9 +379,13 @@ def process_phrases_batch(state: HealthState) -> None:
                         state=state,
                     )
                     if not ok:
+                        if _is_retryable_qwen_api_error(full_err):
+                            raise RuntimeError(full_err)
                         failed_task(item["task_id"], error=f"splice exception and full fallback failed: {full_err}")
                         state.inc_phrase_failed()
                 except Exception as full_exc:
+                    if _is_retryable_qwen_api_error(full_exc):
+                        raise
                     failed_task(item["task_id"], error=str(full_exc))
                     state.inc_phrase_failed()
                     state.set_error(str(full_exc))
@@ -366,9 +404,13 @@ def process_phrases_batch(state: HealthState) -> None:
                 state=state,
             )
             if not ok:
+                if _is_retryable_qwen_api_error(full_err):
+                    raise RuntimeError(full_err)
                 failed_task(item["task_id"], error=f"full phrase failed: {full_err}")
                 state.inc_phrase_failed()
         except Exception as exc:
+            if _is_retryable_qwen_api_error(exc):
+                raise
             failed_task(item["task_id"], error=str(exc))
             state.inc_phrase_failed()
             state.set_error(str(exc))

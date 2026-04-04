@@ -78,6 +78,10 @@ class FakeModel:
 
 
 class ServerGenerationStabilityTests(unittest.TestCase):
+    def test_is_fatal_cuda_error_detects_device_assert(self) -> None:
+        self.assertTrue(server_tts.is_fatal_cuda_error("CUDA error: device-side assert triggered"))
+        self.assertFalse(server_tts.is_fatal_cuda_error("timeout waiting for phrase"))
+
     def test_generate_voice_uses_stable_clone_defaults(self) -> None:
         model = FakeModel()
         with patch.object(server_tts, "_get_model", return_value=model):

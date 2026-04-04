@@ -45,6 +45,7 @@ from .tts import (
     clean_output_audio,
     generate_voice,
     generate_voice_with_similarity_retry,
+    is_fatal_cuda_error,
     splice_speech_segments,
     wav_from_bytes,
     wav_to_bytes,
@@ -60,6 +61,17 @@ db = TaskDB(SQLITE_PATH)
 worker = Worker(db, logger)
 VOICE_CLONE_GENERATE_CONFIG = voice_clone_generate_config()
 OUTPUT_AUDIO_TRIM_CONFIG = output_audio_trim_config()
+
+
+def _crash_process_on_fatal_cuda(exc: Exception, context: str) -> None:
+    if not is_fatal_cuda_error(exc):
+        return
+    logger.critical(
+        "Fatal CUDA error in %s. Uvicorn process will exit so run_api.sh can restart it. Error: %s",
+        context,
+        exc,
+    )
+    os._exit(86)
 
 
 def _voice_paths(support_id: str, voice_id: str) -> dict:
@@ -289,6 +301,9 @@ def _fetch_task_worker_health() -> dict:
 
 @app.on_event("startup")
 def _startup() -> None:
+    recovered = db.requeue_running_tasks()
+    if recovered:
+        logger.warning("Recovered %s stale running local queue task(s) after startup.", recovered)
     t = threading.Thread(target=worker.run_forever, daemon=True)
     t.start()
     logger.info("API started.")
@@ -315,6 +330,13 @@ async def create_profile(
         raise HTTPException(status_code=400, detail="voice_name is required")
 
     paths = _voice_paths(support_id, voice_id)
+    if object_exists(paths["voice_json"]):
+        try:
+            existing = read_json(paths["voice_json"])
+            if existing.get("status") in ("queued", "processing", "running"):
+                return CreateProfileResponse(support_id=support_id, voice_id=voice_id, status=str(existing.get("status")))
+        except Exception:
+            pass
 
     sample_key = paths["sample"]
     if not object_exists(sample_key):
@@ -380,6 +402,13 @@ def create_phrase(req: CreatePhraseRequest) -> CreatePhraseResponse:
         raise HTTPException(status_code=400, detail="text is required")
 
     paths = _phrase_paths(req.support_id, req.phrase_id)
+    if object_exists(paths["phrase_json"]):
+        try:
+            existing = read_json(paths["phrase_json"])
+            if existing.get("status") in ("queued", "processing", "running"):
+                return CreatePhraseResponse(phrase_id=req.phrase_id, status=str(existing.get("status")))
+        except Exception:
+            pass
     phrase_json = {
         "support_id": req.support_id,
         "voice_id": req.voice_id,
@@ -455,26 +484,30 @@ def splice_test_phrase(req: SpliceTestRequest) -> Response:
             )
         raise HTTPException(status_code=501, detail="latent_concat experimental path is not implemented yet")
 
-    (
-        wav_bytes,
-        body_hash,
-        body_cache_hit,
-        splice_strategy,
-        greeting_similarity,
-        greeting_attempts,
-        greeting_similarity_passed,
-        greeting_quality,
-        output_trim,
-    ) = _synthesize_spliced_phrase(
-        support_id=req.support_id,
-        voice_id=req.voice_id,
-        greeting=req.greeting,
-        body=req.body,
-        pause_ms=req.pause_ms,
-        crossfade_ms=req.crossfade_ms,
-        content_aware=req.content_aware,
-        target_lufs=req.target_lufs,
-    )
+    try:
+        (
+            wav_bytes,
+            body_hash,
+            body_cache_hit,
+            splice_strategy,
+            greeting_similarity,
+            greeting_attempts,
+            greeting_similarity_passed,
+            greeting_quality,
+            output_trim,
+        ) = _synthesize_spliced_phrase(
+            support_id=req.support_id,
+            voice_id=req.voice_id,
+            greeting=req.greeting,
+            body=req.body,
+            pause_ms=req.pause_ms,
+            crossfade_ms=req.crossfade_ms,
+            content_aware=req.content_aware,
+            target_lufs=req.target_lufs,
+        )
+    except Exception as exc:
+        _crash_process_on_fatal_cuda(exc, "splice-test")
+        raise
 
     return Response(
         content=wav_bytes,
@@ -598,6 +631,7 @@ def create_phrase_splice_prod(req: CreateSplicePhraseRequest) -> CreatePhraseRes
                 "updated_at": int(time.time()),
             },
         )
+        _crash_process_on_fatal_cuda(exc, "splice-prod")
         raise
 
     return CreatePhraseResponse(phrase_id=req.phrase_id, status="done")

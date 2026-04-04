@@ -1,6 +1,7 @@
 import io
 import re
 import tempfile
+import threading
 from typing import Any, Dict, List, Optional, Tuple
 
 import librosa
@@ -32,6 +33,18 @@ _MODEL_CACHE: Dict[str, Qwen3TTSModel] = {}
 _VOICE_CLONE_GENERATE_CONFIG = voice_clone_generate_config()
 _GREETING_RETRY_GENERATE_CONFIG = greeting_similarity_retry_generate_config()
 _H_GREETING_RE = re.compile(r"^\s*(hi|hello)\b", re.IGNORECASE)
+_MODEL_LOCK = threading.RLock()
+_FATAL_CUDA_ERROR_MARKERS = (
+    "device-side assert triggered",
+    "cuda error",
+    "cublas",
+    "cudnn",
+    "illegal memory access",
+    "an illegal memory access was encountered",
+    "unspecified launch failure",
+    "misaligned address",
+    "device kernel image is invalid",
+)
 
 
 def _get_device() -> str:
@@ -42,23 +55,29 @@ def _get_device() -> str:
 
 def _get_model() -> Qwen3TTSModel:
     key = f"Base-{MODEL_SIZE}"
-    if key in _MODEL_CACHE:
+    with _MODEL_LOCK:
+        if key in _MODEL_CACHE:
+            return _MODEL_CACHE[key]
+
+        import torch
+        from huggingface_hub import snapshot_download
+
+        model_path = snapshot_download(f"Qwen/Qwen3-TTS-12Hz-{MODEL_SIZE}-Base")
+        device = _get_device()
+        dtype = torch.bfloat16 if device == "cuda" else torch.float32
+
+        _MODEL_CACHE[key] = Qwen3TTSModel.from_pretrained(
+            model_path,
+            device_map=device,
+            dtype=dtype,
+            attn_implementation="sdpa",
+        )
         return _MODEL_CACHE[key]
 
-    import torch
-    from huggingface_hub import snapshot_download
 
-    model_path = snapshot_download(f"Qwen/Qwen3-TTS-12Hz-{MODEL_SIZE}-Base")
-    device = _get_device()
-    dtype = torch.bfloat16 if device == "cuda" else torch.float32
-
-    _MODEL_CACHE[key] = Qwen3TTSModel.from_pretrained(
-        model_path,
-        device_map=device,
-        dtype=dtype,
-        attn_implementation="sdpa",
-    )
-    return _MODEL_CACHE[key]
+def is_fatal_cuda_error(exc_or_text: Any) -> bool:
+    text = str(exc_or_text or "").lower()
+    return any(marker in text for marker in _FATAL_CUDA_ERROR_MARKERS)
 
 
 def _normalize_audio(wav: np.ndarray) -> np.ndarray:
@@ -108,12 +127,13 @@ def create_voice_prompt(
     ref_text: Optional[str],
     x_vector_only: bool,
 ) -> VoiceClonePromptItem:
-    tts = _get_model()
-    items = tts.create_voice_clone_prompt(
-        ref_audio=ref_audio,
-        ref_text=(ref_text.strip() if ref_text else None),
-        x_vector_only_mode=bool(x_vector_only),
-    )
+    with _MODEL_LOCK:
+        tts = _get_model()
+        items = tts.create_voice_clone_prompt(
+            ref_audio=ref_audio,
+            ref_text=(ref_text.strip() if ref_text else None),
+            x_vector_only_mode=bool(x_vector_only),
+        )
     if not items:
         raise RuntimeError("Voice prompt creation returned empty result.")
     return items[0]
@@ -131,13 +151,14 @@ def generate_voice(
     voice_prompt: List[VoiceClonePromptItem],
     generate_config: Optional[Dict[str, Any]] = None,
 ) -> Tuple[np.ndarray, int]:
-    tts = _get_model()
-    wavs, sr = tts.generate_voice_clone(
-        text=text,
-        language=LANGUAGE,
-        voice_clone_prompt=voice_prompt,
-        **_effective_generate_config(generate_config),
-    )
+    with _MODEL_LOCK:
+        tts = _get_model()
+        wavs, sr = tts.generate_voice_clone(
+            text=text,
+            language=LANGUAGE,
+            voice_clone_prompt=voice_prompt,
+            **_effective_generate_config(generate_config),
+        )
     return wavs[0], sr
 
 
@@ -153,12 +174,13 @@ def _embedding_to_numpy(embedding: Any) -> np.ndarray:
 
 
 def extract_speaker_embedding(audio: np.ndarray, sr: int):
-    tts = _get_model()
-    wav = _normalize_audio(audio)
-    target_sr = int(tts.model.speaker_encoder_sample_rate)
-    if int(sr) != target_sr:
-        wav = librosa.resample(y=wav.astype(np.float32), orig_sr=int(sr), target_sr=target_sr)
-    return tts.model.extract_speaker_embedding(audio=wav, sr=target_sr)
+    with _MODEL_LOCK:
+        tts = _get_model()
+        wav = _normalize_audio(audio)
+        target_sr = int(tts.model.speaker_encoder_sample_rate)
+        if int(sr) != target_sr:
+            wav = librosa.resample(y=wav.astype(np.float32), orig_sr=int(sr), target_sr=target_sr)
+        return tts.model.extract_speaker_embedding(audio=wav, sr=target_sr)
 
 
 def speaker_similarity(audio: np.ndarray, sr: int, reference_embedding: Any) -> float:

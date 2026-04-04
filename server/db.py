@@ -2,7 +2,7 @@ import json
 import sqlite3
 import time
 from dataclasses import dataclass
-from typing import Any, Dict, Optional
+from typing import Any, Dict, List, Optional
 
 
 @dataclass
@@ -146,6 +146,23 @@ class TaskDB:
         finally:
             conn.close()
 
+    def requeue_running_tasks(self) -> int:
+        now = time.time()
+        conn = self._connect()
+        try:
+            cur = conn.execute(
+                """
+                UPDATE tasks
+                SET status='queued', updated_at=?, next_run_at=?
+                WHERE status='running'
+                """,
+                (now, now),
+            )
+            conn.commit()
+            return int(cur.rowcount or 0)
+        finally:
+            conn.close()
+
     def stats(self) -> Dict[str, int]:
         conn = self._connect()
         try:
@@ -175,7 +192,7 @@ class TaskDB:
         finally:
             conn.close()
 
-    def list_recent(self, limit: int = 50) -> list[Dict[str, Any]]:
+    def list_recent(self, limit: int = 50) -> List[Dict[str, Any]]:
         conn = self._connect()
         try:
             rows = conn.execute(
