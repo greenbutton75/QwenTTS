@@ -13,6 +13,7 @@ from qwen_tts import Qwen3TTSModel, VoiceClonePromptItem
 
 from .config import (
     GREETING_ONSET_ARTIFACT_CHECK,
+    GREETING_OUTPUT_TRIM_PAD_MS,
     LANGUAGE,
     OUTPUT_AUDIO_MAX_INTERNAL_SILENCE_MS,
     MODEL_SIZE,
@@ -221,7 +222,6 @@ def generate_voice_with_similarity_retry(
     for attempt in range(1, total_attempts + 1):
         generate_config = None if attempt == 1 else dict(_GREETING_RETRY_GENERATE_CONFIG)
         wav, sr = generate_voice(text, voice_prompt, generate_config=generate_config)
-        wav, sr, _ = clean_output_audio(wav, sr)
         similarity = speaker_similarity(wav, sr, reference_embedding)
         onset_stats = detect_greeting_onset_artifact(text, wav, sr)
         preroll_stats = detect_greeting_leading_preroll_artifact(text, wav, sr)
@@ -809,7 +809,14 @@ def clean_reference_audio(wav: np.ndarray, sr: int) -> Tuple[np.ndarray, int, Di
     return cleaned, int(sr), stats
 
 
-def clean_output_audio(wav: np.ndarray, sr: int) -> Tuple[np.ndarray, int, Dict[str, int]]:
+def _clean_output_audio_impl(
+    wav: np.ndarray,
+    sr: int,
+    *,
+    pad_ms: int,
+    max_leading_ms: int,
+    max_trailing_ms: int,
+) -> Tuple[np.ndarray, int, Dict[str, int]]:
     audio = _normalize_audio(wav)
     if not OUTPUT_AUDIO_TRIM_ENABLED:
         stats = {
@@ -827,9 +834,9 @@ def clean_output_audio(wav: np.ndarray, sr: int) -> Tuple[np.ndarray, int, Dict[
     edge_cleaned, edge_stats = trim_audio_edges(
         audio,
         sr=int(sr),
-        pad_ms=OUTPUT_AUDIO_TRIM_PAD_MS,
-        max_leading_ms=OUTPUT_AUDIO_TRIM_MAX_LEADING_MS,
-        max_trailing_ms=OUTPUT_AUDIO_TRIM_MAX_TRAILING_MS,
+        pad_ms=pad_ms,
+        max_leading_ms=max_leading_ms,
+        max_trailing_ms=max_trailing_ms,
     )
     compacted, silence_stats = compact_internal_silences(
         edge_cleaned,
@@ -843,6 +850,36 @@ def clean_output_audio(wav: np.ndarray, sr: int) -> Tuple[np.ndarray, int, Dict[
     stats["internal_silence_removed_ms"] = int(silence_stats["removed_ms"])
     stats["cleaned_ms"] = int(round(compacted.shape[0] * 1000.0 / sr)) if sr else 0
     return compacted, int(sr), stats
+
+
+def clean_output_audio(wav: np.ndarray, sr: int) -> Tuple[np.ndarray, int, Dict[str, int]]:
+    return _clean_output_audio_impl(
+        wav,
+        sr,
+        pad_ms=OUTPUT_AUDIO_TRIM_PAD_MS,
+        max_leading_ms=OUTPUT_AUDIO_TRIM_MAX_LEADING_MS,
+        max_trailing_ms=OUTPUT_AUDIO_TRIM_MAX_TRAILING_MS,
+    )
+
+
+def clean_output_audio_preserve_start(wav: np.ndarray, sr: int) -> Tuple[np.ndarray, int, Dict[str, int]]:
+    return _clean_output_audio_impl(
+        wav,
+        sr,
+        pad_ms=max(int(OUTPUT_AUDIO_TRIM_PAD_MS), int(GREETING_OUTPUT_TRIM_PAD_MS)),
+        max_leading_ms=OUTPUT_AUDIO_TRIM_MAX_LEADING_MS,
+        max_trailing_ms=OUTPUT_AUDIO_TRIM_MAX_TRAILING_MS,
+    )
+
+
+def clean_output_audio_without_leading_trim(wav: np.ndarray, sr: int) -> Tuple[np.ndarray, int, Dict[str, int]]:
+    return _clean_output_audio_impl(
+        wav,
+        sr,
+        pad_ms=OUTPUT_AUDIO_TRIM_PAD_MS,
+        max_leading_ms=0,
+        max_trailing_ms=OUTPUT_AUDIO_TRIM_MAX_TRAILING_MS,
+    )
 
 
 def _find_boundary_sample(

@@ -71,6 +71,7 @@ def _install_test_stubs() -> None:
             {"trimmed": 0, "leading_ms": 0, "trailing_ms": 0, "original_ms": 0, "cleaned_ms": 0},
         )
     )
+    fake_tts.clean_output_audio_preserve_start = fake_tts.clean_output_audio
     fake_tts.clean_reference_audio = (
         lambda wav, sr: (
             wav,

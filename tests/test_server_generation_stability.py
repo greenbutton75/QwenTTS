@@ -98,6 +98,28 @@ class ServerGenerationStabilityTests(unittest.TestCase):
         self.assertNotIn("top_k", model.kwargs)
         self.assertNotIn("top_p", model.kwargs)
 
+    def test_similarity_retry_does_not_pretrim_candidate_audio(self) -> None:
+        wav = np.zeros(8, dtype=np.float32)
+        with patch.object(server_tts, "generate_voice", return_value=(wav, 24000)), \
+             patch.object(server_tts, "speaker_similarity", return_value=0.81), \
+             patch.object(server_tts, "detect_greeting_onset_artifact", return_value={"artifact": 0, "checked": 1}), \
+             patch.object(server_tts, "detect_greeting_leading_preroll_artifact", return_value={"artifact": 0, "checked": 1}), \
+             patch.object(server_tts, "clean_output_audio", side_effect=AssertionError("should not pretrim")):
+            out_wav, sr, similarity, attempts, passed, quality = server_tts.generate_voice_with_similarity_retry(
+                text="Hi, Kevin,",
+                voice_prompt=["prompt"],
+                reference_embedding=np.array([0.1, 0.2], dtype=np.float32),
+                min_similarity=0.55,
+                max_attempts=3,
+            )
+
+        self.assertTrue(np.array_equal(out_wav, wav))
+        self.assertEqual(sr, 24000)
+        self.assertAlmostEqual(similarity, 0.81, places=6)
+        self.assertEqual(attempts, 1)
+        self.assertTrue(passed)
+        self.assertEqual(quality["start_passed"], 1)
+
     def test_similarity_retry_accepts_second_attempt(self) -> None:
         wav = np.zeros(8, dtype=np.float32)
         with patch.object(server_tts, "generate_voice", side_effect=[(wav, 24000), (wav, 24000)]) as generate_mock, \
@@ -239,6 +261,26 @@ class ServerGenerationStabilityTests(unittest.TestCase):
         self.assertLess(cleaned.shape[0], wav.shape[0] - (24000 * 3))
         self.assertEqual(stats["internal_silence_compressed"], 1)
         self.assertGreaterEqual(stats["internal_silence_removed_ms"], 3500)
+
+    def test_clean_output_audio_preserve_start_uses_larger_leading_pad(self) -> None:
+        wav = np.full(16, 0.1, dtype=np.float32)
+        edge_stats = {"trimmed": 0, "leading_ms": 0, "trailing_ms": 0, "original_ms": 1, "cleaned_ms": 1}
+        silence_stats = {"compressed": 0, "spans": 0, "removed_ms": 0, "original_ms": 1, "cleaned_ms": 1}
+        with patch.object(server_tts, "trim_audio_edges", return_value=(wav, edge_stats)) as trim_mock, \
+             patch.object(server_tts, "compact_internal_silences", return_value=(wav, silence_stats)):
+            server_tts.clean_output_audio_preserve_start(wav, 24000)
+
+        self.assertEqual(trim_mock.call_args.kwargs["pad_ms"], server_tts.GREETING_OUTPUT_TRIM_PAD_MS)
+
+    def test_clean_output_audio_without_leading_trim_disables_leading_trim(self) -> None:
+        wav = np.full(16, 0.1, dtype=np.float32)
+        edge_stats = {"trimmed": 0, "leading_ms": 0, "trailing_ms": 0, "original_ms": 1, "cleaned_ms": 1}
+        silence_stats = {"compressed": 0, "spans": 0, "removed_ms": 0, "original_ms": 1, "cleaned_ms": 1}
+        with patch.object(server_tts, "trim_audio_edges", return_value=(wav, edge_stats)) as trim_mock, \
+             patch.object(server_tts, "compact_internal_silences", return_value=(wav, silence_stats)):
+            server_tts.clean_output_audio_without_leading_trim(wav, 24000)
+
+        self.assertEqual(trim_mock.call_args.kwargs["max_leading_ms"], 0)
 
     def test_detect_greeting_onset_artifact_flags_stationary_voiced_start(self) -> None:
         sr = 24000

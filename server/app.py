@@ -43,6 +43,8 @@ from .s3_store import (
 )
 from .tts import (
     clean_output_audio,
+    clean_output_audio_preserve_start,
+    clean_output_audio_without_leading_trim,
     generate_voice,
     generate_voice_with_similarity_retry,
     is_fatal_cuda_error,
@@ -225,9 +227,10 @@ def _synthesize_spliced_phrase(
             )
         if GREETING_ONSET_ARTIFACT_REQUIRE_PASS and not greeting_quality.get("start_passed", 1):
             raise HTTPException(status_code=422, detail="greeting start artifact detected in all attempts")
+        greeting_wav, sr_greeting, _ = clean_output_audio_preserve_start(greeting_wav, sr_greeting)
     else:
         greeting_wav, sr_greeting = generate_voice(greeting, voice_prompt)
-        greeting_wav, sr_greeting, _ = clean_output_audio(greeting_wav, sr_greeting)
+        greeting_wav, sr_greeting, _ = clean_output_audio_preserve_start(greeting_wav, sr_greeting)
     body_wav, sr_body, body_hash, body_cache_hit = _load_or_generate_body_wav(
         support_id=support_id,
         voice_id=voice_id,
@@ -269,7 +272,7 @@ def _synthesize_spliced_phrase(
         content_aware=content_aware,
         target_lufs=target_lufs,
     )
-    merged_wav, merged_sr, output_trim = clean_output_audio(merged_wav, int(sr_greeting))
+    merged_wav, merged_sr, output_trim = clean_output_audio_without_leading_trim(merged_wav, int(sr_greeting))
     return (
         wav_to_bytes(merged_wav, int(merged_sr)),
         body_hash,
