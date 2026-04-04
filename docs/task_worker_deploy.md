@@ -135,6 +135,11 @@ The server-side output cleanup was extended to handle real production failures:
   - short voiced garbage onset
   - long low-energy pre-roll before the first strong speech segment
 - bad greeting/start candidates are retried instead of being hard-cut blindly
+- fatal CUDA generation failures are now handled explicitly:
+  - shared GPU inference is serialized with a global lock
+  - fatal CUDA errors kill the API process so `run_api.sh` can restart it cleanly
+  - local API queue items stuck in `running` are recovered back to `queued` on startup
+  - retryable Qwen API / CUDA failures are bubbled up for retry instead of immediately failing the remote task
 - affects both full-phrase and splice generation paths because the cleanup lives in the shared server audio postprocess
 
 New relevant env:
@@ -153,6 +158,8 @@ Operational note:
 - previously generated bad `phrases/*.wav` in S3 must be regenerated
 - if all greeting attempts still have a bad start, the task will now fail/retry instead of publishing a broken file
 - phrase metadata now includes start-quality fields such as `greeting_onset_*`, `greeting_preroll_*`, and `greeting_start_passed`
+- after `CUDA error: device-side assert triggered`, do not trust same-process full fallback; the intended recovery path is API restart
+- tasks already completed as remote `failed` in async_task_manager must still be recreated manually
 
 ## Resilience
 

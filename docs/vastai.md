@@ -291,6 +291,12 @@ Production audio postprocess was strengthened after real cases with multi-second
   - short voiced garbage at the very beginning is rejected
   - long low-energy pre-roll before the first strong speech segment is rejected
   - bad candidates are retried instead of being hard-cut blindly
+- fatal CUDA generation failures are now handled more defensively:
+  - access to the shared GPU model is serialized with a global lock
+  - fatal CUDA errors such as `device-side assert triggered` cause the API process to exit
+  - `scripts/run_api.sh` then restarts uvicorn automatically
+  - stale local API queue items with status `running` are moved back to `queued` on startup
+  - `task_worker` treats retryable Qwen API / CUDA failures as retryable instead of final task failures
 - cleanup now applies to:
   - full phrase generation,
   - splice greeting,
@@ -312,6 +318,8 @@ Operational note:
 - old `phrases/*.wav` already stored in S3 remain unchanged and must be regenerated
 - old `splice_cache/` can be left in place, but a profile refresh or new cache key will bypass it automatically
 - if all greeting attempts still produce a bad start, the service now fails the candidate instead of returning a broken WAV
+- after a fatal CUDA crash, the recommended path is to let `run_api.sh` restart the API instead of trying to reuse the poisoned CUDA context
+- remote tasks already marked as `failed` in async_task_manager still need to be recreated manually
 
 ## 8) Windows Watchdog
 
