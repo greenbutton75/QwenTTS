@@ -145,7 +145,15 @@ The server-side output cleanup was extended to handle real production failures:
   - accepted retry candidates are no longer pre-trimmed before final cleanup
   - greeting/full-phrase paths now preserve more leading context with a larger pad
   - final merged splice cleanup no longer trims the start a second time
+- boundary cleanup was extended to remove long noisy edge blocks that are not true silence:
+  - low-energy boundary spans are trimmed after the ordinary edge pass
+  - a chunk-based clarity trim keeps the main speech block and removes long noisy prefixes/suffixes
+  - a local clarity refinement removes residual buzzing on the first/last seconds after the coarse cut
 - affects both full-phrase and splice generation paths because the cleanup lives in the shared server audio postprocess
+- `task_worker` latency was reduced without touching audio quality:
+  - `PHRASE_POLL_INTERVAL` default changed from `15` to `5`
+  - `POST /phrases` and `POST /phrases/splice-prod` submit timeouts default to `150s`
+  - health/status timeouts are configurable separately
 
 New relevant env:
 
@@ -153,10 +161,16 @@ New relevant env:
 OUTPUT_AUDIO_TRIM_MAX_LEADING_MS=15000
 OUTPUT_AUDIO_TRIM_MAX_TRAILING_MS=2000
 OUTPUT_AUDIO_MAX_INTERNAL_SILENCE_MS=600
-OUTPUT_AUDIO_TRIM_ALGORITHM_VERSION=rms_flatness_pause_compact_v3
+OUTPUT_AUDIO_TRIM_ALGORITHM_VERSION=rms_flatness_pause_compact_v4
 GREETING_OUTPUT_TRIM_PAD_MS=160
 GREETING_ONSET_ARTIFACT_CHECK=true
 GREETING_ONSET_ARTIFACT_REQUIRE_PASS=true
+PHRASE_POLL_INTERVAL=5
+QWEN_TTS_HEALTH_TIMEOUT_SECONDS=5
+QWEN_TTS_STATUS_TIMEOUT_SECONDS=30
+QWEN_TTS_PROFILE_REQUEST_TIMEOUT_SECONDS=180
+QWEN_TTS_PHRASE_REQUEST_TIMEOUT_SECONDS=150
+QWEN_TTS_SPLICE_REQUEST_TIMEOUT_SECONDS=150
 ```
 
 Operational note:
@@ -167,6 +181,8 @@ Operational note:
 - after `CUDA error: device-side assert triggered`, do not trust same-process full fallback; the intended recovery path is API restart
 - tasks already completed as remote `failed` in async_task_manager must still be recreated manually
 - phrases generated during the short greeting over-trim regression window must be regenerated because the saved audio is already clipped
+- if `splice_failures` grows together with `phrase_fallback_full`, the full-phrase path is being used as the expensive recovery path after failed splice attempts
+- if splice failures are dominated by `Read timed out`, increasing greeting retries is not the right fix; address API hangs/timeouts first
 
 ## Health counter notes
 

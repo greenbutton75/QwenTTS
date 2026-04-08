@@ -302,14 +302,22 @@ Production audio postprocess was strengthened after real cases with multi-second
   - retry candidate generation no longer pre-trims accepted greeting audio
   - greeting/full-phrase paths now use a larger leading pad to preserve soft speech onset
   - final merged splice cleanup no longer re-trims the leading edge
+- boundary cleanup was extended for long noise blocks at the start/end:
+  - low-energy boundary artifacts are trimmed after the ordinary edge pass
+  - a chunk-based clarity trim keeps the main speech block and removes long noisy boundary spans
+  - a final local clarity refinement removes residual boundary buzzing on the first/last seconds of already-cleaned audio
 - cleanup now applies to:
   - full phrase generation,
   - splice greeting,
   - cached/generated body,
   - final merged phrase
 - trim/cache fingerprint version was bumped:
-  - `OUTPUT_AUDIO_TRIM_ALGORITHM_VERSION=rms_flatness_pause_compact_v3`
+  - `OUTPUT_AUDIO_TRIM_ALGORITHM_VERSION=rms_flatness_pause_compact_v4`
   - new code will not reuse old body cache objects generated with older trim behavior
+- `task_worker` was also tuned for lower latency without changing synthesis quality:
+  - `PHRASE_POLL_INTERVAL` now defaults to `5`
+  - phrase/splice API submit timeouts now default to `150s`
+  - health/status timeouts are configurable separately
 
 Relevant greeting-start env:
 
@@ -317,6 +325,12 @@ Relevant greeting-start env:
 GREETING_OUTPUT_TRIM_PAD_MS=160
 GREETING_ONSET_ARTIFACT_CHECK=true
 GREETING_ONSET_ARTIFACT_REQUIRE_PASS=true
+PHRASE_POLL_INTERVAL=5
+QWEN_TTS_HEALTH_TIMEOUT_SECONDS=5
+QWEN_TTS_STATUS_TIMEOUT_SECONDS=30
+QWEN_TTS_PROFILE_REQUEST_TIMEOUT_SECONDS=180
+QWEN_TTS_PHRASE_REQUEST_TIMEOUT_SECONDS=150
+QWEN_TTS_SPLICE_REQUEST_TIMEOUT_SECONDS=150
 ```
 
 Operational note:
@@ -327,6 +341,8 @@ Operational note:
 - after a fatal CUDA crash, the recommended path is to let `run_api.sh` restart the API instead of trying to reuse the poisoned CUDA context
 - remote tasks already marked as `failed` in async_task_manager still need to be recreated manually
 - phrases generated during the brief over-trim regression window must also be regenerated because the stored WAVs are already cut
+- if `splice_failures` and `phrase_fallback_full` grow together, that means failed splice attempts are pushing work onto the slower full-phrase path
+- if the dominant splice errors are `Read timed out`, increasing greeting retries will not help; the fix is to address API hangs / timeouts first
 
 ## 8) Windows Watchdog
 

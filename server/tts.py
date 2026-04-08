@@ -788,6 +788,370 @@ def compact_internal_silences(
     }
 
 
+def trim_low_energy_boundary_artifacts(
+    wav: np.ndarray,
+    sr: int,
+    *,
+    pad_ms: int,
+    max_leading_ms: int,
+    max_trailing_ms: int,
+    allow_leading_artifact_trim: bool = True,
+    frame_ms: int = 20,
+    hop_ms: int = 10,
+    min_run_frames: int = 3,
+    min_strong_run_frames: int = 8,
+) -> Tuple[np.ndarray, Dict[str, int]]:
+    audio = _normalize_audio(wav)
+    total_samples = int(audio.shape[0])
+    default = {
+        "trimmed": 0,
+        "leading_ms": 0,
+        "trailing_ms": 0,
+        "original_ms": int(round(total_samples * 1000.0 / sr)) if sr else 0,
+        "cleaned_ms": int(round(total_samples * 1000.0 / sr)) if sr else 0,
+    }
+    if total_samples == 0:
+        return audio, default
+
+    speech_like, frame_samples, hop_samples = _speech_frame_mask(
+        audio,
+        sr=int(sr),
+        frame_ms=frame_ms,
+        hop_ms=hop_ms,
+    )
+    if speech_like.size == 0:
+        return audio, default
+
+    rms = _rms_envelope(audio, frame_samples=frame_samples, hop_samples=hop_samples)
+    min_len = min(rms.size, speech_like.size)
+    if min_len < max(12, min_strong_run_frames):
+        return audio, default
+    rms = rms[:min_len]
+    speech_like = speech_like[:min_len]
+
+    speech_start_frame = _find_active_run_start(speech_like, min_run=min_run_frames)
+    speech_end_frame = _find_active_run_end(speech_like, min_run=min_run_frames)
+    if speech_start_frame is None or speech_end_frame is None:
+        return audio, default
+
+    global_p95 = float(np.percentile(rms, 95))
+    global_p98 = float(np.percentile(rms, 98))
+    global_p90 = float(np.percentile(rms, 90))
+    strong_threshold = max(0.018, global_p90 * 0.45, global_p95 * 0.33, global_p98 * 0.28)
+    strong_mask = speech_like & (rms >= strong_threshold)
+    strong_start_frame = _find_active_run_start(strong_mask, min_run=min_strong_run_frames)
+    strong_end_frame = _find_active_run_end(strong_mask, min_run=min_strong_run_frames)
+    if strong_start_frame is None:
+        strong_start_frame = speech_start_frame
+    if strong_end_frame is None:
+        strong_end_frame = speech_end_frame
+
+    pad_samples = max(0, int(sr * pad_ms / 1000.0))
+    max_leading_samples = max(0, int(sr * max_leading_ms / 1000.0))
+    max_trailing_samples = max(0, int(sr * max_trailing_ms / 1000.0))
+    start_sample = 0
+    end_sample = total_samples
+
+    if allow_leading_artifact_trim and strong_start_frame is not None:
+        leading = rms[:strong_start_frame]
+        leading_p95 = float(np.percentile(leading, 95)) if leading.size else 0.0
+        leading_speech_ratio = float(np.mean(speech_like[:strong_start_frame])) if strong_start_frame > 0 else 0.0
+        strong_start_ms = int(round(strong_start_frame * hop_samples * 1000.0 / sr))
+        delayed_strong_start = bool(
+            strong_start_ms >= 450
+            and leading.size >= 20
+            and leading_speech_ratio <= 0.35
+            and leading_p95 <= global_p95 * 0.35
+        )
+
+        preroll_artifact = False
+        if strong_start_frame > speech_start_frame:
+            preroll = rms[speech_start_frame:strong_start_frame]
+            preroll_ms = int(round((strong_start_frame - speech_start_frame) * hop_samples * 1000.0 / sr))
+            preroll_p95 = float(np.percentile(preroll, 95)) if preroll.size else 0.0
+            preroll_speech_ratio = float(np.mean(speech_like[speech_start_frame:strong_start_frame])) if preroll.size else 0.0
+            preroll_artifact = bool(
+                preroll_ms >= 1200
+                and preroll.size >= 40
+                and preroll_speech_ratio <= 0.40
+                and preroll_p95 <= global_p95 * 0.45
+            )
+
+        if delayed_strong_start or preroll_artifact:
+            proposed_start = max(0, strong_start_frame * hop_samples - pad_samples)
+            start_sample = min(proposed_start, max_leading_samples)
+
+    if strong_end_frame is not None and strong_end_frame < (rms.size - 1):
+        tail = rms[strong_end_frame + 1 :]
+        tail_ms = int(round((rms.size - 1 - strong_end_frame) * hop_samples * 1000.0 / sr))
+        tail_mean = float(np.mean(tail)) if tail.size else 0.0
+        tail_p95 = float(np.percentile(tail, 95)) if tail.size else 0.0
+        tail_strong_ratio = float(np.mean(strong_mask[strong_end_frame + 1 :])) if tail.size else 0.0
+        weak_trailing_tail = bool(
+            tail_ms >= 400
+            and tail.size >= 20
+            and tail_mean <= global_p95 * 0.35
+            and tail_p95 <= global_p95 * 0.75
+            and tail_strong_ratio <= 0.20
+        )
+        if weak_trailing_tail:
+            proposed_end = min(total_samples, strong_end_frame * hop_samples + frame_samples + pad_samples)
+            end_sample = max(proposed_end, total_samples - max_trailing_samples)
+
+    if end_sample <= start_sample + max(1, frame_samples):
+        return audio, default
+
+    cleaned = audio[start_sample:end_sample].astype(np.float32)
+    leading_ms = int(round(start_sample * 1000.0 / sr))
+    trailing_ms = int(round((total_samples - end_sample) * 1000.0 / sr))
+    return cleaned, {
+        "trimmed": int(start_sample > 0 or end_sample < total_samples),
+        "leading_ms": leading_ms,
+        "trailing_ms": trailing_ms,
+        "original_ms": int(round(total_samples * 1000.0 / sr)),
+        "cleaned_ms": int(round(cleaned.shape[0] * 1000.0 / sr)),
+    }
+
+
+def trim_low_clarity_boundary_blocks(
+    wav: np.ndarray,
+    sr: int,
+    *,
+    pad_ms: int,
+    min_boundary_ms: int = 10000,
+    chunk_ms: int = 10000,
+    hop_ms: int = 5000,
+    frame_ms: int = 40,
+    feature_hop_ms: int = 20,
+) -> Tuple[np.ndarray, Dict[str, int]]:
+    audio = _normalize_audio(wav)
+    total_samples = int(audio.shape[0])
+    default = {
+        "trimmed": 0,
+        "leading_ms": 0,
+        "trailing_ms": 0,
+        "original_ms": int(round(total_samples * 1000.0 / sr)) if sr else 0,
+        "cleaned_ms": int(round(total_samples * 1000.0 / sr)) if sr else 0,
+    }
+    if total_samples == 0:
+        return audio, default
+
+    chunk_samples = max(1, int(sr * chunk_ms / 1000.0))
+    hop_samples = max(1, int(sr * hop_ms / 1000.0))
+    if total_samples < chunk_samples + hop_samples:
+        return audio, default
+
+    frame_samples = max(1, int(sr * frame_ms / 1000.0))
+    feature_hop_samples = max(1, int(sr * feature_hop_ms / 1000.0))
+    chunk_metrics = []
+    for start in range(0, total_samples - chunk_samples + 1, hop_samples):
+        segment = audio[start : start + chunk_samples]
+        rms = _rms_envelope(segment, frame_samples=frame_samples, hop_samples=feature_hop_samples)
+        flat = _spectral_flatness_envelope(segment, frame_samples=frame_samples, hop_samples=feature_hop_samples)
+        cent = _spectral_centroid_envelope(
+            segment,
+            sr=int(sr),
+            frame_samples=frame_samples,
+            hop_samples=feature_hop_samples,
+        )
+        min_len = min(rms.size, flat.size, cent.size)
+        if min_len < 8:
+            continue
+        rms = rms[:min_len]
+        flat = flat[:min_len]
+        cent = cent[:min_len]
+
+        def _cv(values: np.ndarray) -> float:
+            mean = float(np.mean(values))
+            return 0.0 if mean <= 1e-8 else float(np.std(values) / (mean + 1e-8))
+
+        chunk_metrics.append(
+            {
+                "start": start,
+                "end": start + chunk_samples,
+                "rms": float(np.mean(rms)),
+                "flat": float(np.mean(flat)),
+                "cent": float(np.mean(cent)),
+                "rms_cv": _cv(rms),
+                "flat_cv": _cv(flat),
+                "cent_cv": _cv(cent),
+            }
+        )
+
+    if len(chunk_metrics) < 3:
+        return audio, default
+
+    metrics = np.asarray(
+        [
+            [item["rms"], item["flat"], item["cent"], item["rms_cv"], item["flat_cv"], item["cent_cv"]]
+            for item in chunk_metrics
+        ],
+        dtype=np.float32,
+    )
+    reference = metrics[metrics[:, 0] >= float(np.percentile(metrics[:, 0], 70))]
+    if reference.size == 0:
+        reference = metrics
+    ref_rms, ref_flat, ref_cent, ref_rms_cv, ref_flat_cv, ref_cent_cv = np.median(reference, axis=0)
+
+    scores = []
+    for item in chunk_metrics:
+        score = (
+            0.20 * min(item["rms"] / max(float(ref_rms), 1e-6), 1.5)
+            + 0.25 * min(item["flat"] / max(float(ref_flat), 1e-6), 1.5)
+            + 0.20 * min(item["cent"] / max(float(ref_cent), 1e-6), 1.5)
+            + 0.15 * min(item["rms_cv"] / max(float(ref_rms_cv), 1e-6), 1.5)
+            + 0.10 * min(item["flat_cv"] / max(float(ref_flat_cv), 1e-6), 1.5)
+            + 0.10 * min(item["cent_cv"] / max(float(ref_cent_cv), 1e-6), 1.5)
+        )
+        scores.append(float(score))
+    scores = np.asarray(scores, dtype=np.float32)
+    if scores.size >= 3:
+        scores = np.convolve(scores, np.asarray([0.25, 0.5, 0.25], dtype=np.float32), mode="same")
+    good = scores >= 0.80
+    if not np.any(good):
+        return audio, default
+
+    first_good = int(np.argmax(good))
+    last_good = int(good.size - 1 - np.argmax(good[::-1]))
+    leading_ms = int(round(chunk_metrics[first_good]["start"] * 1000.0 / sr))
+    trailing_ms = int(round((total_samples - chunk_metrics[last_good]["end"]) * 1000.0 / sr))
+
+    start_sample = 0
+    end_sample = total_samples
+    pad_samples = max(0, int(sr * pad_ms / 1000.0))
+    if leading_ms >= int(min_boundary_ms):
+        start_sample = max(0, int(chunk_metrics[first_good]["start"]) - pad_samples)
+    if trailing_ms >= int(min_boundary_ms):
+        end_sample = min(total_samples, int(chunk_metrics[last_good]["end"]) + pad_samples)
+    if end_sample <= start_sample + max(1, frame_samples):
+        return audio, default
+    if start_sample == 0 and end_sample == total_samples:
+        return audio, default
+
+    cleaned = audio[start_sample:end_sample].astype(np.float32)
+    return cleaned, {
+        "trimmed": 1,
+        "leading_ms": int(round(start_sample * 1000.0 / sr)),
+        "trailing_ms": int(round((total_samples - end_sample) * 1000.0 / sr)),
+        "original_ms": int(round(total_samples * 1000.0 / sr)),
+        "cleaned_ms": int(round(cleaned.shape[0] * 1000.0 / sr)),
+    }
+
+
+def refine_local_clarity_boundaries(
+    wav: np.ndarray,
+    sr: int,
+    *,
+    pad_ms: int,
+    inspect_ms: int = 8000,
+    min_leading_gap_ms: int = 1000,
+    min_trailing_gap_ms: int = 2000,
+    window_ms: int = 1000,
+    hop_ms: int = 500,
+) -> Tuple[np.ndarray, Dict[str, int]]:
+    audio = _normalize_audio(wav)
+    total_samples = int(audio.shape[0])
+    default = {
+        "trimmed": 0,
+        "leading_ms": 0,
+        "trailing_ms": 0,
+        "original_ms": int(round(total_samples * 1000.0 / sr)) if sr else 0,
+        "cleaned_ms": int(round(total_samples * 1000.0 / sr)) if sr else 0,
+    }
+    if total_samples < int(sr * 12.0):
+        return audio, default
+
+    window_samples = max(1, int(sr * window_ms / 1000.0))
+    hop_samples = max(1, int(sr * hop_ms / 1000.0))
+    inspect_samples = min(total_samples, max(window_samples, int(sr * inspect_ms / 1000.0)))
+    pad_samples = max(0, int(sr * pad_ms / 1000.0))
+
+    mid_start = int(total_samples * 0.25)
+    mid_end = int(total_samples * 0.75)
+    if mid_end - mid_start < window_samples:
+        return audio, default
+
+    def _window_metrics(segment: np.ndarray) -> Tuple[float, float, float]:
+        spec = np.abs(np.fft.rfft(segment * np.hanning(segment.shape[0]).astype(np.float32))).astype(np.float32)
+        spec = np.maximum(spec, 1e-8)
+        rms = float(np.sqrt(np.mean(np.square(segment)) + 1e-12))
+        flat = float(np.exp(np.mean(np.log(spec))) / np.mean(spec))
+        freqs = np.fft.rfftfreq(segment.shape[0], d=1.0 / float(sr)).astype(np.float32)
+        centroid = float(np.sum(spec * freqs) / np.sum(spec))
+        return rms, flat, centroid
+
+    ref_metrics = []
+    mid_segment = audio[mid_start:mid_end]
+    for start in range(0, mid_segment.shape[0] - window_samples + 1, hop_samples):
+        ref_metrics.append(_window_metrics(mid_segment[start : start + window_samples]))
+    if not ref_metrics:
+        return audio, default
+    ref_rms, ref_flat, ref_cent = np.median(np.asarray(ref_metrics, dtype=np.float32), axis=0)
+
+    def _score(metrics: Tuple[float, float, float]) -> float:
+        rms, flat, cent = metrics
+        return float(
+            0.45 * min(rms / max(float(ref_rms), 1e-6), 1.6)
+            + 0.25 * min(flat / max(float(ref_flat), 1e-6), 1.6)
+            + 0.30 * min(cent / max(float(ref_cent), 1e-6), 1.6)
+        )
+
+    head_scores = []
+    head_offsets = []
+    head_segment = audio[:inspect_samples]
+    for start in range(0, head_segment.shape[0] - window_samples + 1, hop_samples):
+        head_offsets.append(start)
+        head_scores.append(_score(_window_metrics(head_segment[start : start + window_samples])))
+
+    tail_scores = []
+    tail_offsets = []
+    tail_segment = audio[total_samples - inspect_samples :]
+    for start in range(0, tail_segment.shape[0] - window_samples + 1, hop_samples):
+        tail_offsets.append(start)
+        tail_scores.append(_score(_window_metrics(tail_segment[start : start + window_samples])))
+
+    start_sample = 0
+    end_sample = total_samples
+
+    if head_scores:
+        head_scores_arr = np.asarray(head_scores, dtype=np.float32)
+        good_idx = np.where(head_scores_arr >= 1.0)[0]
+        if good_idx.size > 0:
+            first_good = int(good_idx[0])
+            first_good_ms = int(round(head_offsets[first_good] * 1000.0 / sr))
+            if first_good_ms >= int(min_leading_gap_ms):
+                prior = head_scores_arr[:first_good]
+                if prior.size > 0 and float(np.max(prior)) <= 0.90:
+                    start_sample = max(0, head_offsets[first_good] - pad_samples)
+
+    if tail_scores:
+        tail_scores_arr = np.asarray(tail_scores, dtype=np.float32)
+        good_idx = np.where(tail_scores_arr >= 1.0)[0]
+        if good_idx.size > 0:
+            last_good = int(good_idx[-1])
+            tail_base = total_samples - inspect_samples
+            last_good_end = tail_base + tail_offsets[last_good] + window_samples
+            trailing_gap_ms = int(round((total_samples - last_good_end) * 1000.0 / sr))
+            if trailing_gap_ms >= int(min_trailing_gap_ms):
+                after = tail_scores_arr[last_good + 1 :]
+                if after.size > 0 and float(np.max(after)) <= 0.90:
+                    end_sample = min(total_samples, last_good_end + pad_samples)
+
+    if end_sample <= start_sample + window_samples:
+        return audio, default
+    if start_sample == 0 and end_sample == total_samples:
+        return audio, default
+
+    cleaned = audio[start_sample:end_sample].astype(np.float32)
+    return cleaned, {
+        "trimmed": 1,
+        "leading_ms": int(round(start_sample * 1000.0 / sr)),
+        "trailing_ms": int(round((total_samples - end_sample) * 1000.0 / sr)),
+        "original_ms": int(round(total_samples * 1000.0 / sr)),
+        "cleaned_ms": int(round(cleaned.shape[0] * 1000.0 / sr)),
+    }
+
+
 def clean_reference_audio(wav: np.ndarray, sr: int) -> Tuple[np.ndarray, int, Dict[str, int]]:
     audio = _normalize_audio(wav)
     if not REFERENCE_AUDIO_TRIM_ENABLED:
@@ -816,6 +1180,7 @@ def _clean_output_audio_impl(
     pad_ms: int,
     max_leading_ms: int,
     max_trailing_ms: int,
+    allow_leading_artifact_trim: bool = True,
 ) -> Tuple[np.ndarray, int, Dict[str, int]]:
     audio = _normalize_audio(wav)
     if not OUTPUT_AUDIO_TRIM_ENABLED:
@@ -823,6 +1188,9 @@ def _clean_output_audio_impl(
             "trimmed": 0,
             "leading_ms": 0,
             "trailing_ms": 0,
+            "boundary_artifact_trimmed": 0,
+            "boundary_leading_ms": 0,
+            "boundary_trailing_ms": 0,
             "internal_silence_compressed": 0,
             "internal_silence_spans": 0,
             "internal_silence_removed_ms": 0,
@@ -838,13 +1206,58 @@ def _clean_output_audio_impl(
         max_leading_ms=max_leading_ms,
         max_trailing_ms=max_trailing_ms,
     )
-    compacted, silence_stats = compact_internal_silences(
+    boundary_cleaned, boundary_stats = trim_low_energy_boundary_artifacts(
         edge_cleaned,
+        sr=int(sr),
+        pad_ms=pad_ms,
+        max_leading_ms=(OUTPUT_AUDIO_TRIM_MAX_LEADING_MS if allow_leading_artifact_trim else 0),
+        max_trailing_ms=max_trailing_ms,
+        allow_leading_artifact_trim=allow_leading_artifact_trim,
+    )
+    clarity_cleaned, clarity_stats = trim_low_clarity_boundary_blocks(
+        boundary_cleaned,
+        sr=int(sr),
+        pad_ms=pad_ms,
+    )
+    local_clarity_cleaned, local_clarity_stats = refine_local_clarity_boundaries(
+        clarity_cleaned,
+        sr=int(sr),
+        pad_ms=pad_ms,
+    )
+    compacted, silence_stats = compact_internal_silences(
+        local_clarity_cleaned,
         sr=int(sr),
         max_internal_silence_ms=OUTPUT_AUDIO_MAX_INTERNAL_SILENCE_MS,
     )
     stats = dict(edge_stats)
-    stats["trimmed"] = int(bool(edge_stats.get("trimmed")) or bool(silence_stats.get("compressed")))
+    stats["trimmed"] = int(
+        bool(edge_stats.get("trimmed"))
+        or bool(boundary_stats.get("trimmed"))
+        or bool(clarity_stats.get("trimmed"))
+        or bool(local_clarity_stats.get("trimmed"))
+        or bool(silence_stats.get("compressed"))
+    )
+    stats["boundary_artifact_trimmed"] = int(boundary_stats.get("trimmed", 0))
+    stats["boundary_leading_ms"] = int(boundary_stats.get("leading_ms", 0))
+    stats["boundary_trailing_ms"] = int(boundary_stats.get("trailing_ms", 0))
+    stats["clarity_boundary_trimmed"] = int(clarity_stats.get("trimmed", 0))
+    stats["clarity_leading_ms"] = int(clarity_stats.get("leading_ms", 0))
+    stats["clarity_trailing_ms"] = int(clarity_stats.get("trailing_ms", 0))
+    stats["local_clarity_boundary_trimmed"] = int(local_clarity_stats.get("trimmed", 0))
+    stats["local_clarity_leading_ms"] = int(local_clarity_stats.get("leading_ms", 0))
+    stats["local_clarity_trailing_ms"] = int(local_clarity_stats.get("trailing_ms", 0))
+    stats["leading_ms"] = (
+        int(edge_stats.get("leading_ms", 0))
+        + int(boundary_stats.get("leading_ms", 0))
+        + int(clarity_stats.get("leading_ms", 0))
+        + int(local_clarity_stats.get("leading_ms", 0))
+    )
+    stats["trailing_ms"] = (
+        int(edge_stats.get("trailing_ms", 0))
+        + int(boundary_stats.get("trailing_ms", 0))
+        + int(clarity_stats.get("trailing_ms", 0))
+        + int(local_clarity_stats.get("trailing_ms", 0))
+    )
     stats["internal_silence_compressed"] = int(silence_stats["compressed"])
     stats["internal_silence_spans"] = int(silence_stats["spans"])
     stats["internal_silence_removed_ms"] = int(silence_stats["removed_ms"])
@@ -859,6 +1272,7 @@ def clean_output_audio(wav: np.ndarray, sr: int) -> Tuple[np.ndarray, int, Dict[
         pad_ms=OUTPUT_AUDIO_TRIM_PAD_MS,
         max_leading_ms=OUTPUT_AUDIO_TRIM_MAX_LEADING_MS,
         max_trailing_ms=OUTPUT_AUDIO_TRIM_MAX_TRAILING_MS,
+        allow_leading_artifact_trim=True,
     )
 
 
@@ -869,6 +1283,7 @@ def clean_output_audio_preserve_start(wav: np.ndarray, sr: int) -> Tuple[np.ndar
         pad_ms=max(int(OUTPUT_AUDIO_TRIM_PAD_MS), int(GREETING_OUTPUT_TRIM_PAD_MS)),
         max_leading_ms=OUTPUT_AUDIO_TRIM_MAX_LEADING_MS,
         max_trailing_ms=OUTPUT_AUDIO_TRIM_MAX_TRAILING_MS,
+        allow_leading_artifact_trim=True,
     )
 
 
@@ -879,6 +1294,7 @@ def clean_output_audio_without_leading_trim(wav: np.ndarray, sr: int) -> Tuple[n
         pad_ms=OUTPUT_AUDIO_TRIM_PAD_MS,
         max_leading_ms=0,
         max_trailing_ms=OUTPUT_AUDIO_TRIM_MAX_TRAILING_MS,
+        allow_leading_artifact_trim=True,
     )
 
 

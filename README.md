@@ -486,6 +486,16 @@ See `docs/watchdog.md` for configuration, recovery logic, and required env overr
   - `generate_voice_with_similarity_retry()` больше не делает pre-trim кандидата;
   - для greeting/full-phrase с `Hi` / `Hello` используется более щадящий стартовый pad;
   - финальная cleanup после splice больше не режет leading edge повторно.
+- Добавлена дополнительная boundary-cleanup защита против длинных шумовых блоков на краях:
+  - сначала убираются длинные low-energy pre-roll / post-roll артефакты;
+  - затем применяется chunk-based clarity trim, который ищет главный блок нормальной речи и отрезает длинные шумовые блоки по краям;
+  - после этого выполняется локальный boundary refinement, чтобы снять остаточное жужжание на первых/последних секундах уже очищенного WAV;
+  - это исправляет реальные кейсы с файлами вида `*_StartNoise.wav`, `*_EndNoise.wav`, `*_StartAndEndNoise.wav`, где шум был не тишиной, а речеподобным монотонным мусором.
+- Ускорен `task_worker` без изменения качества аудио:
+  - `PHRASE_POLL_INTERVAL` уменьшен с `15` до `5` секунд;
+  - вызовы `task_worker -> API` получили отдельные timeout env;
+  - default timeout для `POST /phrases` и `POST /phrases/splice-prod` уменьшен до `150` секунд;
+  - worker теперь быстрее замечает готовые фразы и меньше времени теряет на подвисших splice/full запросах.
 
 Новые/важные env для контроля поведения:
 
@@ -495,10 +505,16 @@ OUTPUT_AUDIO_TRIM_PAD_MS=30
 OUTPUT_AUDIO_TRIM_MAX_LEADING_MS=15000
 OUTPUT_AUDIO_TRIM_MAX_TRAILING_MS=2000
 OUTPUT_AUDIO_MAX_INTERNAL_SILENCE_MS=600
-OUTPUT_AUDIO_TRIM_ALGORITHM_VERSION=rms_flatness_pause_compact_v3
+OUTPUT_AUDIO_TRIM_ALGORITHM_VERSION=rms_flatness_pause_compact_v4
 GREETING_OUTPUT_TRIM_PAD_MS=160
 GREETING_ONSET_ARTIFACT_CHECK=true
 GREETING_ONSET_ARTIFACT_REQUIRE_PASS=true
+PHRASE_POLL_INTERVAL=5
+QWEN_TTS_HEALTH_TIMEOUT_SECONDS=5
+QWEN_TTS_STATUS_TIMEOUT_SECONDS=30
+QWEN_TTS_PROFILE_REQUEST_TIMEOUT_SECONDS=180
+QWEN_TTS_PHRASE_REQUEST_TIMEOUT_SECONDS=150
+QWEN_TTS_SPLICE_REQUEST_TIMEOUT_SECONDS=150
 ```
 
 Операционно это значит:
@@ -510,6 +526,8 @@ GREETING_ONSET_ARTIFACT_REQUIRE_PASS=true
 - после такого рестарта зависшие локальные задачи API должны сами вернуться в `queued`;
 - уже завершённые как `failed` remote tasks в async_task_manager автоматически не оживают, их нужно пересоздать отдельно.
 - после выката фикса `Preserve greeting starts during output cleanup` нужно перегенерировать фразы из окна регрессии, где начало greeting уже было обрезано.
+- если `splice_failures` растёт одновременно с `phrase_fallback_full`, это означает, что дорогой full-phrase путь используется как следствие неуспешного splice;
+- если в логах при этом доминируют `Read timed out`, проблема в зависающем API/splice path, а не в слишком маленьком количестве greeting retries.
 
 ## Возможности
 

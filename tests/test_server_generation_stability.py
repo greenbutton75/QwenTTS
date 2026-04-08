@@ -275,12 +275,122 @@ class ServerGenerationStabilityTests(unittest.TestCase):
     def test_clean_output_audio_without_leading_trim_disables_leading_trim(self) -> None:
         wav = np.full(16, 0.1, dtype=np.float32)
         edge_stats = {"trimmed": 0, "leading_ms": 0, "trailing_ms": 0, "original_ms": 1, "cleaned_ms": 1}
+        boundary_stats = {"trimmed": 0, "leading_ms": 0, "trailing_ms": 0, "original_ms": 1, "cleaned_ms": 1}
         silence_stats = {"compressed": 0, "spans": 0, "removed_ms": 0, "original_ms": 1, "cleaned_ms": 1}
         with patch.object(server_tts, "trim_audio_edges", return_value=(wav, edge_stats)) as trim_mock, \
+             patch.object(server_tts, "trim_low_energy_boundary_artifacts", return_value=(wav, boundary_stats)) as boundary_mock, \
              patch.object(server_tts, "compact_internal_silences", return_value=(wav, silence_stats)):
             server_tts.clean_output_audio_without_leading_trim(wav, 24000)
 
         self.assertEqual(trim_mock.call_args.kwargs["max_leading_ms"], 0)
+        self.assertTrue(boundary_mock.call_args.kwargs["allow_leading_artifact_trim"])
+
+    def test_clean_output_audio_without_leading_trim_removes_long_low_energy_preroll(self) -> None:
+        sr = 24000
+        rng = np.random.default_rng(21)
+        preroll = rng.normal(0.0, 0.001, int(sr * 6.0)).astype(np.float32)
+        t = np.linspace(0.0, 1.0, int(sr * 1.0), endpoint=False, dtype=np.float32)
+        speech = (0.16 * np.sin(2.0 * np.pi * 220.0 * t)).astype(np.float32)
+        wav = np.concatenate([preroll, speech, speech])
+
+        cleaned, out_sr, stats = server_tts.clean_output_audio_without_leading_trim(wav, sr)
+
+        self.assertEqual(out_sr, sr)
+        self.assertLess(cleaned.shape[0], wav.shape[0] - int(sr * 5.0))
+        self.assertGreaterEqual(stats["boundary_leading_ms"], 5000)
+        self.assertEqual(stats["boundary_artifact_trimmed"], 1)
+
+    def test_clean_output_audio_without_leading_trim_preserves_soft_real_start(self) -> None:
+        sr = 24000
+        rng = np.random.default_rng(23)
+        breath = rng.normal(0.0, 0.010, int(sr * 0.08)).astype(np.float32)
+        t = np.linspace(0.0, 1.0, int(sr * 1.0), endpoint=False, dtype=np.float32)
+        speech = (0.12 * np.sin(2.0 * np.pi * 220.0 * t)).astype(np.float32)
+        wav = np.concatenate([breath, speech, speech * 1.02])
+
+        cleaned, out_sr, stats = server_tts.clean_output_audio_without_leading_trim(wav, sr)
+
+        self.assertEqual(out_sr, sr)
+        self.assertGreaterEqual(cleaned.shape[0], wav.shape[0] - int(sr * 0.2))
+        self.assertEqual(stats["boundary_leading_ms"], 0)
+
+    def test_clean_output_audio_trims_weak_trailing_tail(self) -> None:
+        sr = 24000
+        t = np.linspace(0.0, 1.2, int(sr * 1.2), endpoint=False, dtype=np.float32)
+        speech = (0.17 * np.sin(2.0 * np.pi * 210.0 * t)).astype(np.float32)
+        tail_t = np.linspace(0.0, 1.2, int(sr * 1.2), endpoint=False, dtype=np.float32)
+        tail = (0.035 * np.sin(2.0 * np.pi * 190.0 * tail_t)).astype(np.float32)
+        gap = int(sr * 0.08)
+        period = gap * 2
+        for start in range(0, tail.shape[0], period):
+            tail[start : start + gap] = 0.0
+        wav = np.concatenate([speech, speech * 0.98, tail])
+
+        cleaned, out_sr, stats = server_tts.clean_output_audio_without_leading_trim(wav, sr)
+
+        self.assertEqual(out_sr, sr)
+        self.assertLess(cleaned.shape[0], wav.shape[0] - int(sr * 0.3))
+        self.assertGreaterEqual(stats["boundary_trailing_ms"], 400)
+        self.assertEqual(stats["boundary_artifact_trimmed"], 1)
+
+    def test_clean_output_audio_trims_long_low_clarity_prefix_and_suffix(self) -> None:
+        sr = 24000
+        rng = np.random.default_rng(31)
+        prefix_t = np.linspace(0.0, 20.0, int(sr * 20.0), endpoint=False, dtype=np.float32)
+        prefix = (
+            0.030 * np.sin(2.0 * np.pi * 120.0 * prefix_t)
+            + 0.0105 * np.sin(2.0 * np.pi * 240.0 * prefix_t)
+        ).astype(np.float32)
+        prefix += rng.normal(0.0, 0.0015, prefix.shape[0]).astype(np.float32)
+
+        speech_t = np.linspace(0.0, 22.0, int(sr * 22.0), endpoint=False, dtype=np.float32)
+        carrier = np.sin(2.0 * np.pi * (180.0 + 30.0 * np.sin(2.0 * np.pi * 2.8 * speech_t)) * speech_t)
+        mod = 0.55 + 0.45 * np.sin(2.0 * np.pi * 4.0 * speech_t)
+        speech = (0.085 * carrier * mod).astype(np.float32)
+        speech += rng.normal(0.0, 0.0025, speech.shape[0]).astype(np.float32)
+
+        suffix_t = np.linspace(0.0, 20.0, int(sr * 20.0), endpoint=False, dtype=np.float32)
+        suffix = (
+            0.030 * np.sin(2.0 * np.pi * 110.0 * suffix_t)
+            + 0.009 * np.sin(2.0 * np.pi * 220.0 * suffix_t)
+        ).astype(np.float32)
+        suffix += rng.normal(0.0, 0.0012, suffix.shape[0]).astype(np.float32)
+
+        wav = np.concatenate([prefix, speech, suffix])
+
+        cleaned, out_sr, stats = server_tts.clean_output_audio_without_leading_trim(wav, sr)
+
+        self.assertEqual(out_sr, sr)
+        self.assertLess(cleaned.shape[0], wav.shape[0] - int(sr * 15.0))
+        self.assertGreaterEqual(stats["clarity_leading_ms"], 10000)
+        self.assertGreaterEqual(stats["clarity_trailing_ms"], 10000)
+        self.assertEqual(stats["clarity_boundary_trimmed"], 1)
+
+    def test_refine_local_clarity_boundaries_trims_residual_trailing_buzz(self) -> None:
+        sr = 24000
+        rng = np.random.default_rng(33)
+
+        lead_t = np.linspace(0.0, 2.0, int(sr * 2.0), endpoint=False, dtype=np.float32)
+        lead = (0.050 * np.sin(2.0 * np.pi * 170.0 * lead_t)).astype(np.float32)
+        lead += rng.normal(0.0, 0.0020, lead.shape[0]).astype(np.float32)
+
+        speech_t = np.linspace(0.0, 24.0, int(sr * 24.0), endpoint=False, dtype=np.float32)
+        carrier = np.sin(2.0 * np.pi * (185.0 + 25.0 * np.sin(2.0 * np.pi * 3.2 * speech_t)) * speech_t)
+        mod = 0.55 + 0.45 * np.sin(2.0 * np.pi * 4.3 * speech_t)
+        speech = (0.085 * carrier * mod).astype(np.float32)
+        speech += rng.normal(0.0, 0.002, speech.shape[0]).astype(np.float32)
+
+        tail_t = np.linspace(0.0, 4.0, int(sr * 4.0), endpoint=False, dtype=np.float32)
+        tail = (0.012 * np.sin(2.0 * np.pi * 70.0 * tail_t)).astype(np.float32)
+        tail += rng.normal(0.0, 0.0008, tail.shape[0]).astype(np.float32)
+
+        wav = np.concatenate([lead, speech, tail])
+
+        cleaned, stats = server_tts.refine_local_clarity_boundaries(wav, sr, pad_ms=server_tts.OUTPUT_AUDIO_TRIM_PAD_MS)
+
+        self.assertLess(cleaned.shape[0], wav.shape[0] - int(sr * 2.5))
+        self.assertGreaterEqual(stats["trailing_ms"], 2000)
+        self.assertEqual(stats["trimmed"], 1)
 
     def test_detect_greeting_onset_artifact_flags_stationary_voiced_start(self) -> None:
         sr = 24000
