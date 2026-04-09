@@ -22,7 +22,7 @@ from .config import (
 )
 from .cache_utils import body_cache_hash, prompt_fingerprint
 from .db import TaskDB
-from .logging_setup import setup_logging
+from .logging_setup import setup_logging, setup_timing_logging
 from .models import (
     CreatePhraseRequest,
     CreatePhraseResponse,
@@ -53,10 +53,12 @@ from .tts import (
     wav_to_bytes,
 )
 from .worker import Worker
+from timing_utils import timed_operation
 
 
 os.makedirs(os.path.dirname(SQLITE_PATH) or ".", exist_ok=True)
 logger = setup_logging()
+timing_logger = setup_timing_logging()
 app = FastAPI(title="QwenTTS VVK API", version="1.0.0")
 security = HTTPBasic()
 db = TaskDB(SQLITE_PATH)
@@ -124,20 +126,26 @@ def _body_cache_hash(
 
 
 def _load_voice_prompt(support_id: str, voice_id: str):
-    voice_paths = _voice_paths(support_id, voice_id)
-    if not object_exists(voice_paths["prompt"]):
-        raise HTTPException(status_code=404, detail="voice prompt not found, profile is not ready")
-    prompt_data = download_torch(voice_paths["prompt"])
-    voice_prompt = [
-        VoiceClonePromptItem(
-            ref_code=prompt_data["ref_code"],
-            ref_spk_embedding=prompt_data["ref_spk_embedding"],
-            x_vector_only_mode=prompt_data["x_vector_only_mode"],
-            icl_mode=prompt_data["icl_mode"],
-            ref_text=prompt_data.get("ref_text"),
-        )
-    ]
-    return prompt_data, voice_prompt
+    with timed_operation(
+        timing_logger,
+        "api.load_voice_prompt",
+        support_id=support_id,
+        voice_id=voice_id,
+    ):
+        voice_paths = _voice_paths(support_id, voice_id)
+        if not object_exists(voice_paths["prompt"]):
+            raise HTTPException(status_code=404, detail="voice prompt not found, profile is not ready")
+        prompt_data = download_torch(voice_paths["prompt"])
+        voice_prompt = [
+            VoiceClonePromptItem(
+                ref_code=prompt_data["ref_code"],
+                ref_spk_embedding=prompt_data["ref_spk_embedding"],
+                x_vector_only_mode=prompt_data["x_vector_only_mode"],
+                icl_mode=prompt_data["icl_mode"],
+                ref_text=prompt_data.get("ref_text"),
+            )
+        ]
+        return prompt_data, voice_prompt
 
 
 def _load_or_generate_body_wav(
@@ -147,39 +155,62 @@ def _load_or_generate_body_wav(
     prompt_data: dict,
     voice_prompt,
 ):
-    prompt_digest = prompt_fingerprint(prompt_data)
-    body_hash = _body_cache_hash(support_id, voice_id, body, prompt_data)
-    cache_paths = _body_cache_paths(support_id, voice_id, body_hash)
-    body_cache_hit = object_exists(cache_paths["audio"])
-    body_wav = None
-    sr_body = None
-    if body_cache_hit:
-        try:
-            body_wav, sr_body = wav_from_bytes(download_bytes(cache_paths["audio"]))
-        except Exception:
-            body_cache_hit = False
+    with timed_operation(
+        timing_logger,
+        "api.body_cache.prepare",
+        support_id=support_id,
+        voice_id=voice_id,
+        body_chars=len(body or ""),
+    ) as span:
+        prompt_digest = prompt_fingerprint(prompt_data)
+        body_hash = _body_cache_hash(support_id, voice_id, body, prompt_data)
+        cache_paths = _body_cache_paths(support_id, voice_id, body_hash)
+        body_cache_hit = object_exists(cache_paths["audio"])
+        body_wav = None
+        sr_body = None
+        if body_cache_hit:
+            with timed_operation(
+                timing_logger,
+                "api.body_cache.download",
+                support_id=support_id,
+                voice_id=voice_id,
+                body_hash=body_hash,
+            ):
+                try:
+                    body_wav, sr_body = wav_from_bytes(download_bytes(cache_paths["audio"]))
+                except Exception:
+                    body_cache_hit = False
 
-    if not body_cache_hit:
-        body_wav, sr_body = generate_voice(body, voice_prompt)
-        body_wav, sr_body, body_trim = clean_output_audio(body_wav, sr_body)
-        body_bytes = wav_to_bytes(body_wav, int(sr_body))
-        upload_bytes(cache_paths["audio"], body_bytes, "audio/wav")
-        write_json(
-            cache_paths["meta"],
-            {
-                "support_id": support_id,
-                "voice_id": voice_id,
-                "body_hash": body_hash,
-                "body_text": body,
-                "prompt_fingerprint": prompt_digest,
-                "model_size": MODEL_SIZE,
-                "language": LANGUAGE,
-                "generation_config": dict(VOICE_CLONE_GENERATE_CONFIG),
-                "output_trim": body_trim,
-                "created_at": int(time.time()),
-            },
-        )
-    return body_wav, int(sr_body), body_hash, body_cache_hit
+        if not body_cache_hit:
+            with timed_operation(
+                timing_logger,
+                "api.body_cache.generate",
+                support_id=support_id,
+                voice_id=voice_id,
+                body_hash=body_hash,
+                body_chars=len(body or ""),
+            ):
+                body_wav, sr_body = generate_voice(body, voice_prompt)
+                body_wav, sr_body, body_trim = clean_output_audio(body_wav, sr_body)
+                body_bytes = wav_to_bytes(body_wav, int(sr_body))
+                upload_bytes(cache_paths["audio"], body_bytes, "audio/wav")
+                write_json(
+                    cache_paths["meta"],
+                    {
+                        "support_id": support_id,
+                        "voice_id": voice_id,
+                        "body_hash": body_hash,
+                        "body_text": body,
+                        "prompt_fingerprint": prompt_digest,
+                        "model_size": MODEL_SIZE,
+                        "language": LANGUAGE,
+                        "generation_config": dict(VOICE_CLONE_GENERATE_CONFIG),
+                        "output_trim": body_trim,
+                        "created_at": int(time.time()),
+                    },
+                )
+        span.set(body_hash=body_hash, body_cache_hit=body_cache_hit)
+        return body_wav, int(sr_body), body_hash, body_cache_hit
 
 
 def _synthesize_spliced_phrase(
@@ -192,98 +223,141 @@ def _synthesize_spliced_phrase(
     content_aware: bool,
     target_lufs: float,
 ):
-    prompt_data, voice_prompt = _load_voice_prompt(support_id, voice_id)
-    prompt_digest = prompt_fingerprint(prompt_data)
-    greeting_similarity = None
-    greeting_attempts = 1
-    greeting_similarity_passed = None
-    greeting_quality = {
-        "similarity_passed": 0,
-        "onset_artifact": 0,
-        "onset_checked": 0,
-        "onset_passed": 1,
-        "preroll_artifact": 0,
-        "preroll_checked": 0,
-        "preroll_passed": 1,
-        "start_passed": 1,
-    }
-    if GREETING_SPEAKER_SIMILARITY_CHECK:
-        greeting_wav, sr_greeting, greeting_similarity, greeting_attempts, greeting_similarity_passed, greeting_quality = (
-            generate_voice_with_similarity_retry(
-                text=greeting,
-                voice_prompt=voice_prompt,
-                reference_embedding=prompt_data["ref_spk_embedding"],
-                min_similarity=GREETING_SPEAKER_SIMILARITY_THRESHOLD,
-                max_attempts=GREETING_SPEAKER_SIMILARITY_MAX_ATTEMPTS,
-            )
-        )
-        if GREETING_SPEAKER_SIMILARITY_REQUIRE_PASS and not greeting_similarity_passed:
-            raise HTTPException(
-                status_code=422,
-                detail=(
-                    "greeting speaker similarity below threshold: "
-                    f"{greeting_similarity:.4f} < {GREETING_SPEAKER_SIMILARITY_THRESHOLD:.4f}"
-                ),
-            )
-        if GREETING_ONSET_ARTIFACT_REQUIRE_PASS and not greeting_quality.get("start_passed", 1):
-            raise HTTPException(status_code=422, detail="greeting start artifact detected in all attempts")
-        greeting_wav, sr_greeting, _ = clean_output_audio_preserve_start(greeting_wav, sr_greeting)
-    else:
-        greeting_wav, sr_greeting = generate_voice(greeting, voice_prompt)
-        greeting_wav, sr_greeting, _ = clean_output_audio_preserve_start(greeting_wav, sr_greeting)
-    body_wav, sr_body, body_hash, body_cache_hit = _load_or_generate_body_wav(
+    with timed_operation(
+        timing_logger,
+        "api.splice_synthesize.total",
         support_id=support_id,
         voice_id=voice_id,
-        body=body,
-        prompt_data=prompt_data,
-        voice_prompt=voice_prompt,
-    )
-    if int(sr_greeting) != int(sr_body):
-        body_wav, sr_body = generate_voice(body, voice_prompt)
-        body_wav, sr_body, body_trim = clean_output_audio(body_wav, sr_body)
-        body_bytes = wav_to_bytes(body_wav, int(sr_body))
-        cache_paths = _body_cache_paths(support_id, voice_id, body_hash)
-        upload_bytes(cache_paths["audio"], body_bytes, "audio/wav")
-        write_json(
-            cache_paths["meta"],
-            {
-                "support_id": support_id,
-                "voice_id": voice_id,
-                "body_hash": body_hash,
-                "body_text": body,
-                "prompt_fingerprint": prompt_digest,
-                "model_size": MODEL_SIZE,
-                "language": LANGUAGE,
-                "generation_config": dict(VOICE_CLONE_GENERATE_CONFIG),
-                "output_trim": body_trim,
-                "created_at": int(time.time()),
-            },
-        )
-        if int(sr_greeting) != int(sr_body):
-            raise HTTPException(status_code=500, detail="internal error: sample rates mismatch")
-
-    splice_strategy = "content_aware" if content_aware else "simple"
-    merged_wav = splice_speech_segments(
-        greeting_wav=greeting_wav,
-        body_wav=body_wav,
-        sample_rate=int(sr_greeting),
+        greeting_chars=len(greeting or ""),
+        body_chars=len(body or ""),
         pause_ms=pause_ms,
         crossfade_ms=crossfade_ms,
         content_aware=content_aware,
-        target_lufs=target_lufs,
-    )
-    merged_wav, merged_sr, output_trim = clean_output_audio_without_leading_trim(merged_wav, int(sr_greeting))
-    return (
-        wav_to_bytes(merged_wav, int(merged_sr)),
-        body_hash,
-        body_cache_hit,
-        splice_strategy,
-        greeting_similarity,
-        greeting_attempts,
-        greeting_similarity_passed,
-        greeting_quality,
-        output_trim,
-    )
+    ) as span:
+        prompt_data, voice_prompt = _load_voice_prompt(support_id, voice_id)
+        prompt_digest = prompt_fingerprint(prompt_data)
+        greeting_similarity = None
+        greeting_attempts = 1
+        greeting_similarity_passed = None
+        greeting_quality = {
+            "similarity_passed": 0,
+            "onset_artifact": 0,
+            "onset_checked": 0,
+            "onset_passed": 1,
+            "preroll_artifact": 0,
+            "preroll_checked": 0,
+            "preroll_passed": 1,
+            "start_passed": 1,
+        }
+        with timed_operation(
+            timing_logger,
+            "api.splice_synthesize.greeting",
+            support_id=support_id,
+            voice_id=voice_id,
+            greeting_chars=len(greeting or ""),
+            similarity_check=GREETING_SPEAKER_SIMILARITY_CHECK,
+        ):
+            if GREETING_SPEAKER_SIMILARITY_CHECK:
+                greeting_wav, sr_greeting, greeting_similarity, greeting_attempts, greeting_similarity_passed, greeting_quality = (
+                    generate_voice_with_similarity_retry(
+                        text=greeting,
+                        voice_prompt=voice_prompt,
+                        reference_embedding=prompt_data["ref_spk_embedding"],
+                        min_similarity=GREETING_SPEAKER_SIMILARITY_THRESHOLD,
+                        max_attempts=GREETING_SPEAKER_SIMILARITY_MAX_ATTEMPTS,
+                    )
+                )
+                if GREETING_SPEAKER_SIMILARITY_REQUIRE_PASS and not greeting_similarity_passed:
+                    raise HTTPException(
+                        status_code=422,
+                        detail=(
+                            "greeting speaker similarity below threshold: "
+                            f"{greeting_similarity:.4f} < {GREETING_SPEAKER_SIMILARITY_THRESHOLD:.4f}"
+                        ),
+                    )
+                if GREETING_ONSET_ARTIFACT_REQUIRE_PASS and not greeting_quality.get("start_passed", 1):
+                    raise HTTPException(status_code=422, detail="greeting start artifact detected in all attempts")
+                greeting_wav, sr_greeting, _ = clean_output_audio_preserve_start(greeting_wav, sr_greeting)
+            else:
+                greeting_wav, sr_greeting = generate_voice(greeting, voice_prompt)
+                greeting_wav, sr_greeting, _ = clean_output_audio_preserve_start(greeting_wav, sr_greeting)
+        body_wav, sr_body, body_hash, body_cache_hit = _load_or_generate_body_wav(
+            support_id=support_id,
+            voice_id=voice_id,
+            body=body,
+            prompt_data=prompt_data,
+            voice_prompt=voice_prompt,
+        )
+        if int(sr_greeting) != int(sr_body):
+            with timed_operation(
+                timing_logger,
+                "api.body_cache.regenerate_sample_rate_mismatch",
+                support_id=support_id,
+                voice_id=voice_id,
+                body_hash=body_hash,
+            ):
+                body_wav, sr_body = generate_voice(body, voice_prompt)
+                body_wav, sr_body, body_trim = clean_output_audio(body_wav, sr_body)
+                body_bytes = wav_to_bytes(body_wav, int(sr_body))
+                cache_paths = _body_cache_paths(support_id, voice_id, body_hash)
+                upload_bytes(cache_paths["audio"], body_bytes, "audio/wav")
+                write_json(
+                    cache_paths["meta"],
+                    {
+                        "support_id": support_id,
+                        "voice_id": voice_id,
+                        "body_hash": body_hash,
+                        "body_text": body,
+                        "prompt_fingerprint": prompt_digest,
+                        "model_size": MODEL_SIZE,
+                        "language": LANGUAGE,
+                        "generation_config": dict(VOICE_CLONE_GENERATE_CONFIG),
+                        "output_trim": body_trim,
+                        "created_at": int(time.time()),
+                    },
+                )
+                if int(sr_greeting) != int(sr_body):
+                    raise HTTPException(status_code=500, detail="internal error: sample rates mismatch")
+
+        splice_strategy = "content_aware" if content_aware else "simple"
+        with timed_operation(
+            timing_logger,
+            "api.splice_synthesize.merge",
+            support_id=support_id,
+            voice_id=voice_id,
+            body_cache_hit=body_cache_hit,
+            splice_strategy=splice_strategy,
+        ):
+            merged_wav = splice_speech_segments(
+                greeting_wav=greeting_wav,
+                body_wav=body_wav,
+                sample_rate=int(sr_greeting),
+                pause_ms=pause_ms,
+                crossfade_ms=crossfade_ms,
+                content_aware=content_aware,
+                target_lufs=target_lufs,
+            )
+            merged_wav, merged_sr, output_trim = clean_output_audio_without_leading_trim(merged_wav, int(sr_greeting))
+        span.set(
+            body_hash=body_hash,
+            body_cache_hit=body_cache_hit,
+            greeting_attempts=greeting_attempts,
+            greeting_similarity=greeting_similarity,
+            greeting_similarity_passed=greeting_similarity_passed,
+            greeting_start_passed=bool(greeting_quality.get("start_passed", 1)),
+            splice_strategy=splice_strategy,
+        )
+        return (
+            wav_to_bytes(merged_wav, int(merged_sr)),
+            body_hash,
+            body_cache_hit,
+            splice_strategy,
+            greeting_similarity,
+            greeting_attempts,
+            greeting_similarity_passed,
+            greeting_quality,
+            output_trim,
+        )
 
 
 def _check_admin(credentials: HTTPBasicCredentials = Depends(security)) -> str:
@@ -325,54 +399,60 @@ async def create_profile(
     ref_text: Optional[str] = Form(None),
     xvector_only: Optional[bool] = Form(False),
 ) -> CreateProfileResponse:
-    if not support_id.strip():
-        raise HTTPException(status_code=400, detail="support_id is required")
-    if not voice_id.strip():
-        raise HTTPException(status_code=400, detail="voice_id is required")
-    if not voice_name.strip():
-        raise HTTPException(status_code=400, detail="voice_name is required")
+    with timed_operation(
+        timing_logger,
+        "api.create_profile.enqueue",
+        support_id=support_id,
+        voice_id=voice_id,
+    ):
+        if not support_id.strip():
+            raise HTTPException(status_code=400, detail="support_id is required")
+        if not voice_id.strip():
+            raise HTTPException(status_code=400, detail="voice_id is required")
+        if not voice_name.strip():
+            raise HTTPException(status_code=400, detail="voice_name is required")
 
-    paths = _voice_paths(support_id, voice_id)
-    if object_exists(paths["voice_json"]):
-        try:
-            existing = read_json(paths["voice_json"])
-            if existing.get("status") in ("queued", "processing", "running"):
-                return CreateProfileResponse(support_id=support_id, voice_id=voice_id, status=str(existing.get("status")))
-        except Exception:
-            pass
+        paths = _voice_paths(support_id, voice_id)
+        if object_exists(paths["voice_json"]):
+            try:
+                existing = read_json(paths["voice_json"])
+                if existing.get("status") in ("queued", "processing", "running"):
+                    return CreateProfileResponse(support_id=support_id, voice_id=voice_id, status=str(existing.get("status")))
+            except Exception:
+                pass
 
-    sample_key = paths["sample"]
-    if not object_exists(sample_key):
-        raise HTTPException(status_code=404, detail=f"sample not found at s3://{sample_key}")
+        sample_key = paths["sample"]
+        if not object_exists(sample_key):
+            raise HTTPException(status_code=404, detail=f"sample not found at s3://{sample_key}")
 
-    voice_json = {
-        "support_id": support_id,
-        "voice_id": voice_id,
-        "voice_name": voice_name,
-        "status": "queued",
-        "ref_text": ref_text,
-        "x_vector_only": bool(xvector_only),
-        "sample_key": sample_key,
-        "reference_key": paths["reference"],
-        "prompt_key": paths["prompt"],
-        "created_at": int(time.time()),
-        "updated_at": int(time.time()),
-    }
-    write_json(paths["voice_json"], voice_json)
-
-    db.enqueue(
-        "profile",
-        {
+        voice_json = {
             "support_id": support_id,
             "voice_id": voice_id,
             "voice_name": voice_name,
+            "status": "queued",
             "ref_text": ref_text,
             "x_vector_only": bool(xvector_only),
-            "s3_sample_key": sample_key,
-        },
-    )
+            "sample_key": sample_key,
+            "reference_key": paths["reference"],
+            "prompt_key": paths["prompt"],
+            "created_at": int(time.time()),
+            "updated_at": int(time.time()),
+        }
+        write_json(paths["voice_json"], voice_json)
 
-    return CreateProfileResponse(support_id=support_id, voice_id=voice_id, status="queued")
+        db.enqueue(
+            "profile",
+            {
+                "support_id": support_id,
+                "voice_id": voice_id,
+                "voice_name": voice_name,
+                "ref_text": ref_text,
+                "x_vector_only": bool(xvector_only),
+                "s3_sample_key": sample_key,
+            },
+        )
+
+        return CreateProfileResponse(support_id=support_id, voice_id=voice_id, status="queued")
 
 
 @app.get("/profiles/{voice_id}", response_model=ProfileStatusResponse)
@@ -395,45 +475,53 @@ def get_profile_status(voice_id: str, support_id: str) -> ProfileStatusResponse:
 
 @app.post("/phrases", response_model=CreatePhraseResponse)
 def create_phrase(req: CreatePhraseRequest) -> CreatePhraseResponse:
-    if not req.support_id.strip():
-        raise HTTPException(status_code=400, detail="support_id is required")
-    if not req.voice_id.strip():
-        raise HTTPException(status_code=400, detail="voice_id is required")
-    if not req.phrase_id.strip():
-        raise HTTPException(status_code=400, detail="phrase_id is required")
-    if not req.text.strip():
-        raise HTTPException(status_code=400, detail="text is required")
+    with timed_operation(
+        timing_logger,
+        "api.create_phrase.enqueue",
+        support_id=req.support_id,
+        voice_id=req.voice_id,
+        phrase_id=req.phrase_id,
+        text_chars=len(req.text or ""),
+    ):
+        if not req.support_id.strip():
+            raise HTTPException(status_code=400, detail="support_id is required")
+        if not req.voice_id.strip():
+            raise HTTPException(status_code=400, detail="voice_id is required")
+        if not req.phrase_id.strip():
+            raise HTTPException(status_code=400, detail="phrase_id is required")
+        if not req.text.strip():
+            raise HTTPException(status_code=400, detail="text is required")
 
-    paths = _phrase_paths(req.support_id, req.phrase_id)
-    if object_exists(paths["phrase_json"]):
-        try:
-            existing = read_json(paths["phrase_json"])
-            if existing.get("status") in ("queued", "processing", "running"):
-                return CreatePhraseResponse(phrase_id=req.phrase_id, status=str(existing.get("status")))
-        except Exception:
-            pass
-    phrase_json = {
-        "support_id": req.support_id,
-        "voice_id": req.voice_id,
-        "phrase_id": req.phrase_id,
-        "text": req.text,
-        "status": "queued",
-        "result_key": paths["audio"],
-        "created_at": int(time.time()),
-        "updated_at": int(time.time()),
-    }
-    write_json(paths["phrase_json"], phrase_json)
-
-    db.enqueue(
-        "phrase",
-        {
+        paths = _phrase_paths(req.support_id, req.phrase_id)
+        if object_exists(paths["phrase_json"]):
+            try:
+                existing = read_json(paths["phrase_json"])
+                if existing.get("status") in ("queued", "processing", "running"):
+                    return CreatePhraseResponse(phrase_id=req.phrase_id, status=str(existing.get("status")))
+            except Exception:
+                pass
+        phrase_json = {
             "support_id": req.support_id,
             "voice_id": req.voice_id,
             "phrase_id": req.phrase_id,
             "text": req.text,
-        },
-    )
-    return CreatePhraseResponse(phrase_id=req.phrase_id, status="queued")
+            "status": "queued",
+            "result_key": paths["audio"],
+            "created_at": int(time.time()),
+            "updated_at": int(time.time()),
+        }
+        write_json(paths["phrase_json"], phrase_json)
+
+        db.enqueue(
+            "phrase",
+            {
+                "support_id": req.support_id,
+                "voice_id": req.voice_id,
+                "phrase_id": req.phrase_id,
+                "text": req.text,
+            },
+        )
+        return CreatePhraseResponse(phrase_id=req.phrase_id, status="queued")
 
 
 @app.get("/phrases/{phrase_id}", response_model=PhraseStatusResponse)
@@ -459,141 +547,122 @@ def get_phrase_status(phrase_id: str, support_id: str) -> PhraseStatusResponse:
 
 @app.post("/phrases/splice-test")
 def splice_test_phrase(req: SpliceTestRequest) -> Response:
-    if not req.support_id.strip():
-        raise HTTPException(status_code=400, detail="support_id is required")
-    if not req.voice_id.strip():
-        raise HTTPException(status_code=400, detail="voice_id is required")
-    if not req.greeting.strip():
-        raise HTTPException(status_code=400, detail="greeting is required")
-    if not req.body.strip():
-        raise HTTPException(status_code=400, detail="body is required")
-    if req.pause_ms < 0:
-        raise HTTPException(status_code=400, detail="pause_ms must be >= 0")
-    if req.crossfade_ms < 0:
-        raise HTTPException(status_code=400, detail="crossfade_ms must be >= 0")
-    if req.mode not in ("wav_splice", "latent_concat"):
-        raise HTTPException(status_code=400, detail="mode must be 'wav_splice' or 'latent_concat'")
+    with timed_operation(
+        timing_logger,
+        "api.splice_test.request",
+        support_id=req.support_id,
+        voice_id=req.voice_id,
+        mode=req.mode,
+        greeting_chars=len(req.greeting or ""),
+        body_chars=len(req.body or ""),
+    ):
+        if not req.support_id.strip():
+            raise HTTPException(status_code=400, detail="support_id is required")
+        if not req.voice_id.strip():
+            raise HTTPException(status_code=400, detail="voice_id is required")
+        if not req.greeting.strip():
+            raise HTTPException(status_code=400, detail="greeting is required")
+        if not req.body.strip():
+            raise HTTPException(status_code=400, detail="body is required")
+        if req.pause_ms < 0:
+            raise HTTPException(status_code=400, detail="pause_ms must be >= 0")
+        if req.crossfade_ms < 0:
+            raise HTTPException(status_code=400, detail="crossfade_ms must be >= 0")
+        if req.mode not in ("wav_splice", "latent_concat"):
+            raise HTTPException(status_code=400, detail="mode must be 'wav_splice' or 'latent_concat'")
 
-    if req.mode == "latent_concat":
-        enabled = os.getenv("ENABLE_EXPERIMENTAL_LATENT_CONCAT", "false").strip().lower() in (
-            "1",
-            "true",
-            "yes",
-        )
-        if not enabled:
-            raise HTTPException(
-                status_code=400,
-                detail="latent_concat is disabled. Set ENABLE_EXPERIMENTAL_LATENT_CONCAT=true to enable experiments.",
+        if req.mode == "latent_concat":
+            enabled = os.getenv("ENABLE_EXPERIMENTAL_LATENT_CONCAT", "false").strip().lower() in (
+                "1",
+                "true",
+                "yes",
             )
-        raise HTTPException(status_code=501, detail="latent_concat experimental path is not implemented yet")
+            if not enabled:
+                raise HTTPException(
+                    status_code=400,
+                    detail="latent_concat is disabled. Set ENABLE_EXPERIMENTAL_LATENT_CONCAT=true to enable experiments.",
+                )
+            raise HTTPException(status_code=501, detail="latent_concat experimental path is not implemented yet")
 
-    try:
-        (
-            wav_bytes,
-            body_hash,
-            body_cache_hit,
-            splice_strategy,
-            greeting_similarity,
-            greeting_attempts,
-            greeting_similarity_passed,
-            greeting_quality,
-            output_trim,
-        ) = _synthesize_spliced_phrase(
-            support_id=req.support_id,
-            voice_id=req.voice_id,
-            greeting=req.greeting,
-            body=req.body,
-            pause_ms=req.pause_ms,
-            crossfade_ms=req.crossfade_ms,
-            content_aware=req.content_aware,
-            target_lufs=req.target_lufs,
+        try:
+            (
+                wav_bytes,
+                body_hash,
+                body_cache_hit,
+                splice_strategy,
+                greeting_similarity,
+                greeting_attempts,
+                greeting_similarity_passed,
+                greeting_quality,
+                output_trim,
+            ) = _synthesize_spliced_phrase(
+                support_id=req.support_id,
+                voice_id=req.voice_id,
+                greeting=req.greeting,
+                body=req.body,
+                pause_ms=req.pause_ms,
+                crossfade_ms=req.crossfade_ms,
+                content_aware=req.content_aware,
+                target_lufs=req.target_lufs,
+            )
+        except Exception as exc:
+            _crash_process_on_fatal_cuda(exc, "splice-test")
+            raise
+
+        return Response(
+            content=wav_bytes,
+            media_type="audio/wav",
+            headers={
+                "Content-Disposition": f'inline; filename="{req.voice_id}_splice_test.wav"',
+                "X-Body-Cache": "hit" if body_cache_hit else "miss",
+                "X-Body-Cache-Key": body_hash,
+                "X-Mode": req.mode,
+                "X-Splice-Strategy": splice_strategy,
+                "X-Target-Lufs": f"{req.target_lufs:.2f}",
+                "X-Greeting-Similarity": "" if greeting_similarity is None else f"{greeting_similarity:.4f}",
+                "X-Greeting-Attempts": str(greeting_attempts),
+                "X-Greeting-Similarity-Passed": "" if greeting_similarity_passed is None else str(bool(greeting_similarity_passed)).lower(),
+                "X-Greeting-Onset-Checked": str(bool(greeting_quality.get("onset_checked", 0))).lower(),
+                "X-Greeting-Onset-Passed": str(bool(greeting_quality.get("onset_passed", 1))).lower(),
+                "X-Greeting-Onset-Artifact": str(bool(greeting_quality.get("onset_artifact", 0))).lower(),
+                "X-Greeting-Preroll-Checked": str(bool(greeting_quality.get("preroll_checked", 0))).lower(),
+                "X-Greeting-Preroll-Passed": str(bool(greeting_quality.get("preroll_passed", 1))).lower(),
+                "X-Greeting-Preroll-Artifact": str(bool(greeting_quality.get("preroll_artifact", 0))).lower(),
+                "X-Greeting-Start-Passed": str(bool(greeting_quality.get("start_passed", 1))).lower(),
+                "X-Output-Trim-Leading-Ms": str(output_trim["leading_ms"]),
+                "X-Output-Trim-Trailing-Ms": str(output_trim["trailing_ms"]),
+                "X-Output-Trim-Applied": str(bool(output_trim["trimmed"])).lower(),
+            },
         )
-    except Exception as exc:
-        _crash_process_on_fatal_cuda(exc, "splice-test")
-        raise
-
-    return Response(
-        content=wav_bytes,
-        media_type="audio/wav",
-        headers={
-            "Content-Disposition": f'inline; filename="{req.voice_id}_splice_test.wav"',
-            "X-Body-Cache": "hit" if body_cache_hit else "miss",
-            "X-Body-Cache-Key": body_hash,
-            "X-Mode": req.mode,
-            "X-Splice-Strategy": splice_strategy,
-            "X-Target-Lufs": f"{req.target_lufs:.2f}",
-            "X-Greeting-Similarity": "" if greeting_similarity is None else f"{greeting_similarity:.4f}",
-            "X-Greeting-Attempts": str(greeting_attempts),
-            "X-Greeting-Similarity-Passed": "" if greeting_similarity_passed is None else str(bool(greeting_similarity_passed)).lower(),
-            "X-Greeting-Onset-Checked": str(bool(greeting_quality.get("onset_checked", 0))).lower(),
-            "X-Greeting-Onset-Passed": str(bool(greeting_quality.get("onset_passed", 1))).lower(),
-            "X-Greeting-Onset-Artifact": str(bool(greeting_quality.get("onset_artifact", 0))).lower(),
-            "X-Greeting-Preroll-Checked": str(bool(greeting_quality.get("preroll_checked", 0))).lower(),
-            "X-Greeting-Preroll-Passed": str(bool(greeting_quality.get("preroll_passed", 1))).lower(),
-            "X-Greeting-Preroll-Artifact": str(bool(greeting_quality.get("preroll_artifact", 0))).lower(),
-            "X-Greeting-Start-Passed": str(bool(greeting_quality.get("start_passed", 1))).lower(),
-            "X-Output-Trim-Leading-Ms": str(output_trim["leading_ms"]),
-            "X-Output-Trim-Trailing-Ms": str(output_trim["trailing_ms"]),
-            "X-Output-Trim-Applied": str(bool(output_trim["trimmed"])).lower(),
-        },
-    )
 
 
 @app.post("/phrases/splice-prod", response_model=CreatePhraseResponse)
 def create_phrase_splice_prod(req: CreateSplicePhraseRequest) -> CreatePhraseResponse:
-    if not req.support_id.strip():
-        raise HTTPException(status_code=400, detail="support_id is required")
-    if not req.voice_id.strip():
-        raise HTTPException(status_code=400, detail="voice_id is required")
-    if not req.phrase_id.strip():
-        raise HTTPException(status_code=400, detail="phrase_id is required")
-    if not req.greeting.strip():
-        raise HTTPException(status_code=400, detail="greeting is required")
-    if not req.body.strip():
-        raise HTTPException(status_code=400, detail="body is required")
-    if req.pause_ms < 0:
-        raise HTTPException(status_code=400, detail="pause_ms must be >= 0")
-    if req.crossfade_ms < 0:
-        raise HTTPException(status_code=400, detail="crossfade_ms must be >= 0")
+    with timed_operation(
+        timing_logger,
+        "api.splice_prod.request",
+        support_id=req.support_id,
+        voice_id=req.voice_id,
+        phrase_id=req.phrase_id,
+        greeting_chars=len(req.greeting or ""),
+        body_chars=len(req.body or ""),
+    ):
+        if not req.support_id.strip():
+            raise HTTPException(status_code=400, detail="support_id is required")
+        if not req.voice_id.strip():
+            raise HTTPException(status_code=400, detail="voice_id is required")
+        if not req.phrase_id.strip():
+            raise HTTPException(status_code=400, detail="phrase_id is required")
+        if not req.greeting.strip():
+            raise HTTPException(status_code=400, detail="greeting is required")
+        if not req.body.strip():
+            raise HTTPException(status_code=400, detail="body is required")
+        if req.pause_ms < 0:
+            raise HTTPException(status_code=400, detail="pause_ms must be >= 0")
+        if req.crossfade_ms < 0:
+            raise HTTPException(status_code=400, detail="crossfade_ms must be >= 0")
 
-    paths = _phrase_paths(req.support_id, req.phrase_id)
-    write_json(
-        paths["phrase_json"],
-        {
-            "support_id": req.support_id,
-            "voice_id": req.voice_id,
-            "phrase_id": req.phrase_id,
-            "text": f"{req.greeting} {req.body}".strip(),
-            "status": "processing",
-            "result_key": paths["audio"],
-            "created_at": int(time.time()),
-            "updated_at": int(time.time()),
-        },
-    )
-
-    try:
-        (
-            wav_bytes,
-            _,
-            body_cache_hit,
-            splice_strategy,
-            greeting_similarity,
-            greeting_attempts,
-            greeting_similarity_passed,
-            greeting_quality,
-            output_trim,
-        ) = _synthesize_spliced_phrase(
-            support_id=req.support_id,
-            voice_id=req.voice_id,
-            greeting=req.greeting,
-            body=req.body,
-            pause_ms=req.pause_ms,
-            crossfade_ms=req.crossfade_ms,
-            content_aware=req.content_aware,
-            target_lufs=req.target_lufs,
-        )
-        upload_bytes(paths["audio"], wav_bytes, "audio/wav")
-        public_url = create_presigned_url(paths["audio"], expires_seconds=60 * 24 * 3600)
+        paths = _phrase_paths(req.support_id, req.phrase_id)
         write_json(
             paths["phrase_json"],
             {
@@ -601,43 +670,88 @@ def create_phrase_splice_prod(req: CreateSplicePhraseRequest) -> CreatePhraseRes
                 "voice_id": req.voice_id,
                 "phrase_id": req.phrase_id,
                 "text": f"{req.greeting} {req.body}".strip(),
-                "status": "done",
+                "status": "processing",
                 "result_key": paths["audio"],
-                "public_url": public_url,
-                "splice_strategy": splice_strategy,
-                "body_cache": "hit" if body_cache_hit else "miss",
-                "greeting_similarity": greeting_similarity,
-                "greeting_attempts": greeting_attempts,
-                "greeting_similarity_passed": greeting_similarity_passed,
-                "greeting_onset_checked": bool(greeting_quality.get("onset_checked", 0)),
-                "greeting_onset_passed": bool(greeting_quality.get("onset_passed", 1)),
-                "greeting_onset_artifact": bool(greeting_quality.get("onset_artifact", 0)),
-                "greeting_preroll_checked": bool(greeting_quality.get("preroll_checked", 0)),
-                "greeting_preroll_passed": bool(greeting_quality.get("preroll_passed", 1)),
-                "greeting_preroll_artifact": bool(greeting_quality.get("preroll_artifact", 0)),
-                "greeting_start_passed": bool(greeting_quality.get("start_passed", 1)),
-                "output_trim": output_trim,
+                "created_at": int(time.time()),
                 "updated_at": int(time.time()),
             },
         )
-    except Exception as exc:
-        write_json(
-            paths["phrase_json"],
-            {
-                "support_id": req.support_id,
-                "voice_id": req.voice_id,
-                "phrase_id": req.phrase_id,
-                "text": f"{req.greeting} {req.body}".strip(),
-                "status": "failed",
-                "result_key": paths["audio"],
-                "error": str(exc),
-                "updated_at": int(time.time()),
-            },
-        )
-        _crash_process_on_fatal_cuda(exc, "splice-prod")
-        raise
 
-    return CreatePhraseResponse(phrase_id=req.phrase_id, status="done")
+        try:
+            (
+                wav_bytes,
+                _,
+                body_cache_hit,
+                splice_strategy,
+                greeting_similarity,
+                greeting_attempts,
+                greeting_similarity_passed,
+                greeting_quality,
+                output_trim,
+            ) = _synthesize_spliced_phrase(
+                support_id=req.support_id,
+                voice_id=req.voice_id,
+                greeting=req.greeting,
+                body=req.body,
+                pause_ms=req.pause_ms,
+                crossfade_ms=req.crossfade_ms,
+                content_aware=req.content_aware,
+                target_lufs=req.target_lufs,
+            )
+            with timed_operation(
+                timing_logger,
+                "api.splice_prod.persist",
+                support_id=req.support_id,
+                voice_id=req.voice_id,
+                phrase_id=req.phrase_id,
+                body_cache_hit=body_cache_hit,
+            ):
+                upload_bytes(paths["audio"], wav_bytes, "audio/wav")
+                public_url = create_presigned_url(paths["audio"], expires_seconds=60 * 24 * 3600)
+                write_json(
+                    paths["phrase_json"],
+                    {
+                        "support_id": req.support_id,
+                        "voice_id": req.voice_id,
+                        "phrase_id": req.phrase_id,
+                        "text": f"{req.greeting} {req.body}".strip(),
+                        "status": "done",
+                        "result_key": paths["audio"],
+                        "public_url": public_url,
+                        "splice_strategy": splice_strategy,
+                        "body_cache": "hit" if body_cache_hit else "miss",
+                        "greeting_similarity": greeting_similarity,
+                        "greeting_attempts": greeting_attempts,
+                        "greeting_similarity_passed": greeting_similarity_passed,
+                        "greeting_onset_checked": bool(greeting_quality.get("onset_checked", 0)),
+                        "greeting_onset_passed": bool(greeting_quality.get("onset_passed", 1)),
+                        "greeting_onset_artifact": bool(greeting_quality.get("onset_artifact", 0)),
+                        "greeting_preroll_checked": bool(greeting_quality.get("preroll_checked", 0)),
+                        "greeting_preroll_passed": bool(greeting_quality.get("preroll_passed", 1)),
+                        "greeting_preroll_artifact": bool(greeting_quality.get("preroll_artifact", 0)),
+                        "greeting_start_passed": bool(greeting_quality.get("start_passed", 1)),
+                        "output_trim": output_trim,
+                        "updated_at": int(time.time()),
+                    },
+                )
+        except Exception as exc:
+            write_json(
+                paths["phrase_json"],
+                {
+                    "support_id": req.support_id,
+                    "voice_id": req.voice_id,
+                    "phrase_id": req.phrase_id,
+                    "text": f"{req.greeting} {req.body}".strip(),
+                    "status": "failed",
+                    "result_key": paths["audio"],
+                    "error": str(exc),
+                    "updated_at": int(time.time()),
+                },
+            )
+            _crash_process_on_fatal_cuda(exc, "splice-prod")
+            raise
+
+        return CreatePhraseResponse(phrase_id=req.phrase_id, status="done")
 
 
 @app.get("/admin", response_class=HTMLResponse)

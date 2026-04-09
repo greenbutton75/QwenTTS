@@ -4,6 +4,7 @@ import traceback
 from typing import Any, Dict
 
 from .cache_utils import prompt_fingerprint
+from .config import LOG_BACKUPS, LOG_DIR, LOG_MAX_BYTES
 from .config import (
     GREETING_ONSET_ARTIFACT_REQUIRE_PASS,
     GREETING_SPEAKER_SIMILARITY_MAX_ATTEMPTS,
@@ -37,6 +38,7 @@ from .tts import (
     load_audio,
     write_wav_temp,
 )
+from timing_utils import setup_timing_logger, timed_operation
 
 
 def _voice_paths(support_id: str, voice_id: str) -> Dict[str, str]:
@@ -62,6 +64,13 @@ class Worker:
     def __init__(self, db: TaskDB, logger) -> None:
         self.db = db
         self.logger = logger
+        self.timing_logger = setup_timing_logger(
+            logger_name="qwentts.api_worker.timing",
+            log_dir=LOG_DIR,
+            filename="server_timing.log",
+            max_bytes=LOG_MAX_BYTES,
+            backups=LOG_BACKUPS,
+        )
         self._stop = False
 
     def stop(self) -> None:
@@ -116,47 +125,56 @@ class Worker:
         x_vector_only = bool(payload.get("x_vector_only", False))
         s3_sample_key = payload["s3_sample_key"]
 
-        paths = _voice_paths(support_id, voice_id)
+        with timed_operation(
+            self.timing_logger,
+            "api.worker.profile.total",
+            support_id=support_id,
+            voice_id=voice_id,
+        ):
+            paths = _voice_paths(support_id, voice_id)
 
-        sample_bytes = download_bytes(s3_sample_key)
-        sample_path = bytes_to_wav_file(sample_bytes, suffix=".wav")
-        wav, sr = load_audio(sample_path)
-        cleaned_wav, cleaned_sr, reference_trim = clean_reference_audio(wav, sr)
-        prompt_item = create_voice_prompt((cleaned_wav, cleaned_sr), ref_text, x_vector_only)
-        prompt_payload = {
-            "ref_code": prompt_item.ref_code,
-            "ref_spk_embedding": prompt_item.ref_spk_embedding,
-            "x_vector_only_mode": prompt_item.x_vector_only_mode,
-            "icl_mode": prompt_item.icl_mode,
-            "ref_text": prompt_item.ref_text,
-        }
-        prompt_digest = prompt_fingerprint(prompt_payload)
-        reference_path = write_wav_temp(cleaned_wav, cleaned_sr)
+            with timed_operation(self.timing_logger, "api.worker.profile.download_sample", support_id=support_id, voice_id=voice_id):
+                sample_bytes = download_bytes(s3_sample_key)
+                sample_path = bytes_to_wav_file(sample_bytes, suffix=".wav")
+                wav, sr = load_audio(sample_path)
+            with timed_operation(self.timing_logger, "api.worker.profile.prepare_prompt", support_id=support_id, voice_id=voice_id):
+                cleaned_wav, cleaned_sr, reference_trim = clean_reference_audio(wav, sr)
+                prompt_item = create_voice_prompt((cleaned_wav, cleaned_sr), ref_text, x_vector_only)
+                prompt_payload = {
+                    "ref_code": prompt_item.ref_code,
+                    "ref_spk_embedding": prompt_item.ref_spk_embedding,
+                    "x_vector_only_mode": prompt_item.x_vector_only_mode,
+                    "icl_mode": prompt_item.icl_mode,
+                    "ref_text": prompt_item.ref_text,
+                }
+                prompt_digest = prompt_fingerprint(prompt_payload)
+                reference_path = write_wav_temp(cleaned_wav, cleaned_sr)
 
-        delete_prefix(paths["splice_cache_prefix"])
-        upload_file(paths["reference"], reference_path, "audio/wav")
-        upload_torch(paths["prompt"], prompt_payload)
+            with timed_operation(self.timing_logger, "api.worker.profile.persist", support_id=support_id, voice_id=voice_id):
+                delete_prefix(paths["splice_cache_prefix"])
+                upload_file(paths["reference"], reference_path, "audio/wav")
+                upload_torch(paths["prompt"], prompt_payload)
 
-        voice_json = {
-            "support_id": support_id,
-            "voice_id": voice_id,
-            "voice_name": voice_name,
-            "status": "done",
-            "ref_text": ref_text,
-            "x_vector_only": x_vector_only,
-            "reference_key": paths["reference"],
-            "prompt_key": paths["prompt"],
-            "prompt_fingerprint": prompt_digest,
-            "reference_trim": reference_trim,
-            "updated_at": int(time.time()),
-        }
-        write_json(paths["voice_json"], voice_json)
+                voice_json = {
+                    "support_id": support_id,
+                    "voice_id": voice_id,
+                    "voice_name": voice_name,
+                    "status": "done",
+                    "ref_text": ref_text,
+                    "x_vector_only": x_vector_only,
+                    "reference_key": paths["reference"],
+                    "prompt_key": paths["prompt"],
+                    "prompt_fingerprint": prompt_digest,
+                    "reference_trim": reference_trim,
+                    "updated_at": int(time.time()),
+                }
+                write_json(paths["voice_json"], voice_json)
 
-        for path in (sample_path, reference_path):
-            try:
-                os.remove(path)
-            except Exception:
-                pass
+            for path in (sample_path, reference_path):
+                try:
+                    os.remove(path)
+                except Exception:
+                    pass
 
     def _handle_phrase(self, payload: Dict[str, Any]) -> None:
         support_id = payload["support_id"]
@@ -167,88 +185,99 @@ class Worker:
         voice_paths = _voice_paths(support_id, voice_id)
         phrase_paths = _phrase_paths(support_id, phrase_id)
 
-        prompt_data = download_torch(voice_paths["prompt"])
-        voice_prompt = [
-            VoiceClonePromptItem(
-                ref_code=prompt_data["ref_code"],
-                ref_spk_embedding=prompt_data["ref_spk_embedding"],
-                x_vector_only_mode=prompt_data["x_vector_only_mode"],
-                icl_mode=prompt_data["icl_mode"],
-                ref_text=prompt_data.get("ref_text"),
-            )
-        ]
+        with timed_operation(
+            self.timing_logger,
+            "api.worker.phrase.total",
+            support_id=support_id,
+            voice_id=voice_id,
+            phrase_id=phrase_id,
+            text_chars=len(text or ""),
+        ):
+            with timed_operation(self.timing_logger, "api.worker.phrase.load_prompt", support_id=support_id, voice_id=voice_id, phrase_id=phrase_id):
+                prompt_data = download_torch(voice_paths["prompt"])
+                voice_prompt = [
+                    VoiceClonePromptItem(
+                        ref_code=prompt_data["ref_code"],
+                        ref_spk_embedding=prompt_data["ref_spk_embedding"],
+                        x_vector_only_mode=prompt_data["x_vector_only_mode"],
+                        icl_mode=prompt_data["icl_mode"],
+                        ref_text=prompt_data.get("ref_text"),
+                    )
+                ]
 
-        greeting_similarity = None
-        greeting_attempts = 1
-        greeting_similarity_passed = None
-        greeting_quality = {
-            "similarity_passed": 0,
-            "onset_artifact": 0,
-            "onset_checked": 0,
-            "onset_passed": 1,
-            "preroll_artifact": 0,
-            "preroll_checked": 0,
-            "preroll_passed": 1,
-            "start_passed": 1,
-        }
-        if isinstance(text, str) and text.strip().lower().startswith(("hi ", "hi,", "hello ", "hello,")):
-            (
-                wav,
-                sr,
-                greeting_similarity,
-                greeting_attempts,
-                greeting_similarity_passed,
-                greeting_quality,
-            ) = generate_voice_with_similarity_retry(
-                text=text,
-                voice_prompt=voice_prompt,
-                reference_embedding=prompt_data["ref_spk_embedding"],
-                min_similarity=GREETING_SPEAKER_SIMILARITY_THRESHOLD,
-                max_attempts=GREETING_SPEAKER_SIMILARITY_MAX_ATTEMPTS,
-            )
-            if GREETING_SPEAKER_SIMILARITY_REQUIRE_PASS and not greeting_similarity_passed:
-                raise RuntimeError(
-                    "phrase greeting speaker similarity below threshold: "
-                    f"{greeting_similarity:.4f} < {GREETING_SPEAKER_SIMILARITY_THRESHOLD:.4f}"
-                )
-            if GREETING_ONSET_ARTIFACT_REQUIRE_PASS and not greeting_quality.get("start_passed", 1):
-                raise RuntimeError("phrase greeting start artifact detected in all attempts")
-            wav, sr, output_trim = clean_output_audio_preserve_start(wav, sr)
-        else:
-            wav, sr = generate_voice(text, voice_prompt)
-            wav, sr, output_trim = clean_output_audio(wav, sr)
+            greeting_similarity = None
+            greeting_attempts = 1
+            greeting_similarity_passed = None
+            greeting_quality = {
+                "similarity_passed": 0,
+                "onset_artifact": 0,
+                "onset_checked": 0,
+                "onset_passed": 1,
+                "preroll_artifact": 0,
+                "preroll_checked": 0,
+                "preroll_passed": 1,
+                "start_passed": 1,
+            }
+            with timed_operation(self.timing_logger, "api.worker.phrase.generate", support_id=support_id, voice_id=voice_id, phrase_id=phrase_id):
+                if isinstance(text, str) and text.strip().lower().startswith(("hi ", "hi,", "hello ", "hello,")):
+                    (
+                        wav,
+                        sr,
+                        greeting_similarity,
+                        greeting_attempts,
+                        greeting_similarity_passed,
+                        greeting_quality,
+                    ) = generate_voice_with_similarity_retry(
+                        text=text,
+                        voice_prompt=voice_prompt,
+                        reference_embedding=prompt_data["ref_spk_embedding"],
+                        min_similarity=GREETING_SPEAKER_SIMILARITY_THRESHOLD,
+                        max_attempts=GREETING_SPEAKER_SIMILARITY_MAX_ATTEMPTS,
+                    )
+                    if GREETING_SPEAKER_SIMILARITY_REQUIRE_PASS and not greeting_similarity_passed:
+                        raise RuntimeError(
+                            "phrase greeting speaker similarity below threshold: "
+                            f"{greeting_similarity:.4f} < {GREETING_SPEAKER_SIMILARITY_THRESHOLD:.4f}"
+                        )
+                    if GREETING_ONSET_ARTIFACT_REQUIRE_PASS and not greeting_quality.get("start_passed", 1):
+                        raise RuntimeError("phrase greeting start artifact detected in all attempts")
+                    wav, sr, output_trim = clean_output_audio_preserve_start(wav, sr)
+                else:
+                    wav, sr = generate_voice(text, voice_prompt)
+                    wav, sr, output_trim = clean_output_audio(wav, sr)
 
-        tmp_path = write_wav_temp(wav, sr)
-        upload_file(phrase_paths["audio"], tmp_path, "audio/wav")
-        public_url = create_presigned_url(phrase_paths["audio"], expires_seconds=60 * 24 * 3600)
+            with timed_operation(self.timing_logger, "api.worker.phrase.persist", support_id=support_id, voice_id=voice_id, phrase_id=phrase_id):
+                tmp_path = write_wav_temp(wav, sr)
+                upload_file(phrase_paths["audio"], tmp_path, "audio/wav")
+                public_url = create_presigned_url(phrase_paths["audio"], expires_seconds=60 * 24 * 3600)
 
-        phrase_json = {
-            "support_id": support_id,
-            "voice_id": voice_id,
-            "phrase_id": phrase_id,
-            "text": text,
-            "status": "done",
-            "result_key": phrase_paths["audio"],
-            "public_url": public_url,
-            "greeting_similarity": greeting_similarity,
-            "greeting_attempts": greeting_attempts,
-            "greeting_similarity_passed": greeting_similarity_passed,
-            "greeting_onset_checked": bool(greeting_quality.get("onset_checked", 0)),
-            "greeting_onset_passed": bool(greeting_quality.get("onset_passed", 1)),
-            "greeting_onset_artifact": bool(greeting_quality.get("onset_artifact", 0)),
-            "greeting_preroll_checked": bool(greeting_quality.get("preroll_checked", 0)),
-            "greeting_preroll_passed": bool(greeting_quality.get("preroll_passed", 1)),
-            "greeting_preroll_artifact": bool(greeting_quality.get("preroll_artifact", 0)),
-            "greeting_start_passed": bool(greeting_quality.get("start_passed", 1)),
-            "output_trim": output_trim,
-            "updated_at": int(time.time()),
-        }
-        write_json(phrase_paths["phrase_json"], phrase_json)
+                phrase_json = {
+                    "support_id": support_id,
+                    "voice_id": voice_id,
+                    "phrase_id": phrase_id,
+                    "text": text,
+                    "status": "done",
+                    "result_key": phrase_paths["audio"],
+                    "public_url": public_url,
+                    "greeting_similarity": greeting_similarity,
+                    "greeting_attempts": greeting_attempts,
+                    "greeting_similarity_passed": greeting_similarity_passed,
+                    "greeting_onset_checked": bool(greeting_quality.get("onset_checked", 0)),
+                    "greeting_onset_passed": bool(greeting_quality.get("onset_passed", 1)),
+                    "greeting_onset_artifact": bool(greeting_quality.get("onset_artifact", 0)),
+                    "greeting_preroll_checked": bool(greeting_quality.get("preroll_checked", 0)),
+                    "greeting_preroll_passed": bool(greeting_quality.get("preroll_passed", 1)),
+                    "greeting_preroll_artifact": bool(greeting_quality.get("preroll_artifact", 0)),
+                    "greeting_start_passed": bool(greeting_quality.get("start_passed", 1)),
+                    "output_trim": output_trim,
+                    "updated_at": int(time.time()),
+                }
+                write_json(phrase_paths["phrase_json"], phrase_json)
 
-        try:
-            os.remove(tmp_path)
-        except Exception:
-            pass
+            try:
+                os.remove(tmp_path)
+            except Exception:
+                pass
 
     def _update_status_on_failure(
         self, task_type: str, payload: Dict[str, Any], error: str, attempts: int

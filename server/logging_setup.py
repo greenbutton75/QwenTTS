@@ -3,6 +3,7 @@ import os
 from logging.handlers import RotatingFileHandler
 
 from .config import LOG_BACKUPS, LOG_DIR, LOG_MAX_BYTES
+from timing_utils import setup_timing_logger
 
 
 def setup_logging() -> logging.Logger:
@@ -28,3 +29,12 @@ def setup_logging() -> logging.Logger:
 
     return logger
 
+
+def setup_timing_logging() -> logging.Logger:
+    return setup_timing_logger(
+        logger_name="qwentts.timing",
+        log_dir=LOG_DIR,
+        filename="server_timing.log",
+        max_bytes=LOG_MAX_BYTES,
+        backups=LOG_BACKUPS,
+    )
