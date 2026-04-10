@@ -306,6 +306,19 @@ class ServerGenerationStabilityTests(unittest.TestCase):
 
         self.assertEqual(trim_mock.call_args.kwargs["pad_ms"], server_tts.GREETING_OUTPUT_TRIM_PAD_MS)
 
+    def test_clean_output_audio_for_short_greeting_disables_trailing_trim(self) -> None:
+        wav = np.full(16, 0.1, dtype=np.float32)
+        edge_stats = {"trimmed": 0, "leading_ms": 0, "trailing_ms": 0, "original_ms": 1, "cleaned_ms": 1}
+        boundary_stats = {"trimmed": 0, "leading_ms": 0, "trailing_ms": 0, "original_ms": 1, "cleaned_ms": 1}
+        silence_stats = {"compressed": 0, "spans": 0, "removed_ms": 0, "original_ms": 1, "cleaned_ms": 1}
+        with patch.object(server_tts, "trim_audio_edges", return_value=(wav, edge_stats)) as trim_mock, \
+             patch.object(server_tts, "trim_low_energy_boundary_artifacts", return_value=(wav, boundary_stats)), \
+             patch.object(server_tts, "compact_internal_silences", return_value=(wav, silence_stats)):
+            server_tts.clean_output_audio_for_greeting("Hi, Dennis.", wav, 24000)
+
+        self.assertEqual(trim_mock.call_args.kwargs["max_trailing_ms"], 0)
+        self.assertEqual(trim_mock.call_args.kwargs["pad_ms"], server_tts.GREETING_OUTPUT_TRIM_PAD_MS)
+
     def test_clean_output_audio_without_leading_trim_disables_leading_trim(self) -> None:
         wav = np.full(16, 0.1, dtype=np.float32)
         edge_stats = {"trimmed": 0, "leading_ms": 0, "trailing_ms": 0, "original_ms": 1, "cleaned_ms": 1}

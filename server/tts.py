@@ -1528,6 +1528,19 @@ def clean_output_audio_preserve_start(wav: np.ndarray, sr: int) -> Tuple[np.ndar
     )
 
 
+def clean_output_audio_for_greeting(text: str, wav: np.ndarray, sr: int) -> Tuple[np.ndarray, int, Dict[str, int]]:
+    if isinstance(text, str) and _SHORT_GREETING_RE.match(text):
+        return _clean_output_audio_impl(
+            wav,
+            sr,
+            pad_ms=max(int(OUTPUT_AUDIO_TRIM_PAD_MS), int(GREETING_OUTPUT_TRIM_PAD_MS)),
+            max_leading_ms=OUTPUT_AUDIO_TRIM_MAX_LEADING_MS,
+            max_trailing_ms=0,
+            allow_leading_artifact_trim=True,
+        )
+    return clean_output_audio_preserve_start(wav, sr)
+
+
 def clean_output_audio_without_leading_trim(wav: np.ndarray, sr: int) -> Tuple[np.ndarray, int, Dict[str, int]]:
     return _clean_output_audio_impl(
         wav,

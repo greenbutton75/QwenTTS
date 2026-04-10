@@ -46,6 +46,7 @@ from .s3_store import (
 from .tts import (
     clean_output_audio,
     clean_output_audio_preserve_start,
+    clean_output_audio_for_greeting,
     clean_output_audio_without_leading_trim,
     generate_body_with_quality_retry,
     generate_voice,
@@ -295,10 +296,10 @@ def _synthesize_spliced_phrase(
                     greeting_quality.get("start_passed", 1),
                 ):
                     raise HTTPException(status_code=422, detail="greeting quality artifact detected in all attempts")
-                greeting_wav, sr_greeting, _ = clean_output_audio_preserve_start(greeting_wav, sr_greeting)
+                greeting_wav, sr_greeting, _ = clean_output_audio_for_greeting(greeting, greeting_wav, sr_greeting)
             else:
                 greeting_wav, sr_greeting = generate_voice(greeting, voice_prompt)
-                greeting_wav, sr_greeting, _ = clean_output_audio_preserve_start(greeting_wav, sr_greeting)
+                greeting_wav, sr_greeting, _ = clean_output_audio_for_greeting(greeting, greeting_wav, sr_greeting)
         body_wav, sr_body, body_hash, body_cache_hit = _load_or_generate_body_wav(
             support_id=support_id,
             voice_id=voice_id,

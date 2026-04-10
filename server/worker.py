@@ -29,6 +29,7 @@ from .s3_store import (
 from .tts import (
     bytes_to_wav_file,
     clean_output_audio,
+    clean_output_audio_for_greeting,
     clean_output_audio_preserve_start,
     clean_reference_audio,
     create_voice_prompt,
@@ -248,7 +249,7 @@ class Worker:
                         greeting_quality.get("start_passed", 1),
                     ):
                         raise RuntimeError("phrase greeting quality artifact detected in all attempts")
-                    wav, sr, output_trim = clean_output_audio_preserve_start(wav, sr)
+                    wav, sr, output_trim = clean_output_audio_for_greeting(text, wav, sr)
                 else:
                     wav, sr = generate_voice(text, voice_prompt)
                     wav, sr, output_trim = clean_output_audio(wav, sr)
