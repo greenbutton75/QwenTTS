@@ -290,6 +290,7 @@ Production audio postprocess was strengthened after real cases with multi-second
 - greeting/start quality is now protected for phrases beginning with `Hi` / `Hello`:
   - short voiced garbage at the very beginning is rejected
   - long low-energy pre-roll before the first strong speech segment is rejected
+  - clipped short greeting endings like `Hi D..` / `Hi De..` are rejected
   - bad candidates are retried instead of being hard-cut blindly
 - fatal CUDA generation failures are now handled more defensively:
   - access to the shared GPU model is serialized with a global lock
@@ -302,6 +303,7 @@ Production audio postprocess was strengthened after real cases with multi-second
   - retry candidate generation no longer pre-trims accepted greeting audio
   - greeting/full-phrase paths now use a larger leading pad to preserve soft speech onset
   - final merged splice cleanup no longer re-trims the leading edge
+  - short `Hi/Hello Name` greeting cleanup now also preserves the trailing edge so the end of the name is not cut off
 - boundary cleanup was extended for long noise blocks at the start/end:
   - low-energy boundary artifacts are trimmed after the ordinary edge pass
   - a chunk-based clarity trim keeps the main speech block and removes long noisy boundary spans
@@ -311,6 +313,8 @@ Production audio postprocess was strengthened after real cases with multi-second
   - splice greeting,
   - cached/generated body,
   - final merged phrase
+- for voices with unstable long ICL prompts, a confirmed operational fallback is to rebuild the voice profile with `xvector_only=true`
+- if `xvector_only=false`, do not edit `ref_text` independently from the actual sample audio
 - trim/cache fingerprint version was bumped:
   - `OUTPUT_AUDIO_TRIM_ALGORITHM_VERSION=rms_flatness_pause_compact_v4`
   - new code will not reuse old body cache objects generated with older trim behavior
@@ -338,6 +342,7 @@ Operational note:
 - old `phrases/*.wav` already stored in S3 remain unchanged and must be regenerated
 - old `splice_cache/` can be left in place, but a profile refresh or new cache key will bypass it automatically
 - if all greeting attempts still produce a bad start, the service now fails the candidate instead of returning a broken WAV
+- if a specific `xvector_only=true` profile and its cached `body` already sound correct, do not refresh that profile again before validating server-side fixes
 - after a fatal CUDA crash, the recommended path is to let `run_api.sh` restart the API instead of trying to reuse the poisoned CUDA context
 - remote tasks already marked as `failed` in async_task_manager still need to be recreated manually
 - phrases generated during the brief over-trim regression window must also be regenerated because the stored WAVs are already cut

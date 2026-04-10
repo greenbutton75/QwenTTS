@@ -134,6 +134,7 @@ The server-side output cleanup was extended to handle real production failures:
 - rejects bad greeting starts for phrases beginning with `Hi` / `Hello`:
   - short voiced garbage onset
   - long low-energy pre-roll before the first strong speech segment
+  - clipped short greeting endings such as `Hi D..` / `Hi De..`
 - bad greeting/start candidates are retried instead of being hard-cut blindly
 - fatal CUDA generation failures are now handled explicitly:
   - shared GPU inference is serialized with a global lock
@@ -145,10 +146,13 @@ The server-side output cleanup was extended to handle real production failures:
   - accepted retry candidates are no longer pre-trimmed before final cleanup
   - greeting/full-phrase paths now preserve more leading context with a larger pad
   - final merged splice cleanup no longer trims the start a second time
+  - short greeting cleanup now preserves the tail of the name as well, so the end of `Hi, Dennis.` is not removed
 - boundary cleanup was extended to remove long noisy edge blocks that are not true silence:
   - low-energy boundary spans are trimmed after the ordinary edge pass
   - a chunk-based clarity trim keeps the main speech block and removes long noisy prefixes/suffixes
   - a local clarity refinement removes residual buzzing on the first/last seconds after the coarse cut
+- for problematic long ICL references, an operational fallback is to rebuild the profile with `xvector_only=true`
+- when staying in `xvector_only=false`, `ref_text` must remain aligned with the actual sample audio
 - affects both full-phrase and splice generation paths because the cleanup lives in the shared server audio postprocess
 - `task_worker` latency was reduced without touching audio quality:
   - `PHRASE_POLL_INTERVAL` default changed from `15` to `5`
@@ -177,12 +181,13 @@ Operational note:
 
 - previously generated bad `phrases/*.wav` in S3 must be regenerated
 - if all greeting attempts still have a bad start, the task will now fail/retry instead of publishing a broken file
-- phrase metadata now includes start-quality fields such as `greeting_onset_*`, `greeting_preroll_*`, and `greeting_start_passed`
+- phrase metadata now includes greeting quality fields such as `greeting_onset_*`, `greeting_ending_*`, `greeting_preroll_*`, `greeting_start_passed`, and `greeting_passed`
 - after `CUDA error: device-side assert triggered`, do not trust same-process full fallback; the intended recovery path is API restart
 - tasks already completed as remote `failed` in async_task_manager must still be recreated manually
 - phrases generated during the short greeting over-trim regression window must be regenerated because the saved audio is already clipped
 - if `splice_failures` grows together with `phrase_fallback_full`, the full-phrase path is being used as the expensive recovery path after failed splice attempts
 - if splice failures are dominated by `Read timed out`, increasing greeting retries is not the right fix; address API hangs/timeouts first
+- if a current `xvector_only=true` profile and its `body` cache already sound good, keep that profile and validate only the new server code before reprocessing the voice again
 
 ## Health counter notes
 

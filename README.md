@@ -462,8 +462,9 @@ See `docs/watchdog.md` for configuration, recovery logic, and required env overr
   - final merged splice output.
 - Для greeting/start quality теперь сохраняются дополнительные признаки в результатах:
   - `greeting_onset_checked`, `greeting_onset_passed`, `greeting_onset_artifact`;
+  - `greeting_ending_checked`, `greeting_ending_passed`, `greeting_ending_artifact`;
   - `greeting_preroll_checked`, `greeting_preroll_passed`, `greeting_preroll_artifact`;
-  - `greeting_start_passed`.
+  - `greeting_start_passed`, `greeting_passed`.
 - Обновлена версия алгоритма output trim/cache fingerprint:
   - старый `splice_cache/body_*.wav` не используется новым кодом;
   - уже сгенерированные плохие `phrases/*.wav` в S3 нужно перегенерировать отдельно.
@@ -491,6 +492,14 @@ See `docs/watchdog.md` for configuration, recovery logic, and required env overr
   - затем применяется chunk-based clarity trim, который ищет главный блок нормальной речи и отрезает длинные шумовые блоки по краям;
   - после этого выполняется локальный boundary refinement, чтобы снять остаточное жужжание на первых/последних секундах уже очищенного WAV;
   - это исправляет реальные кейсы с файлами вида `*_StartNoise.wav`, `*_EndNoise.wav`, `*_StartAndEndNoise.wav`, где шум был не тишиной, а речеподобным монотонным мусором.
+- Для голосов с нестабильным длинным ICL reference добавлен подтверждённый рабочий fallback:
+  - если profile в режиме `xvector_only=false` начинает протаскивать хвост prompt-а в начало генерации (`Me ...`, `ME I hope ...`), такой voice можно безопасно пересчитать в `xvector_only=true`;
+  - production splice pipeline при этом не меняется: используется тот же `splice-prod`, тот же `content_aware=true`, меняется только voice profile;
+  - `ref_text` нельзя менять отдельно от sample, если voice остаётся в `xvector_only=false`.
+- Исправлены дефекты короткого greeting `Hi/Hello Name`:
+  - добавлен reject кандидатов с обрубленным концом (`Hi D..`, `Hi De..`);
+  - для короткого greeting cleanup больше не режет trailing edge, чтобы не съедать конец имени;
+  - ручная проверка на production-подобном профиле показала, что `content_aware=true` нужно оставлять включённым.
 - Ускорен `task_worker` без изменения качества аудио:
   - `PHRASE_POLL_INTERVAL` уменьшен с `15` до `5` секунд;
   - вызовы `task_worker -> API` получили отдельные timeout env;
@@ -528,6 +537,7 @@ QWEN_TTS_SPLICE_REQUEST_TIMEOUT_SECONDS=150
 - после выката фикса `Preserve greeting starts during output cleanup` нужно перегенерировать фразы из окна регрессии, где начало greeting уже было обрезано.
 - если `splice_failures` растёт одновременно с `phrase_fallback_full`, это означает, что дорогой full-phrase путь используется как следствие неуспешного splice;
 - если в логах при этом доминируют `Read timed out`, проблема в зависающем API/splice path, а не в слишком маленьком количестве greeting retries.
+- если текущий `xvector_only=true` profile и его `body` cache уже звучат хорошо, не нужно заново refresh-ить profile перед проверкой новых серверных фиксов: сначала выкатывайте код и проверяйте тот же `voice_id`.
 
 ## Возможности
 
