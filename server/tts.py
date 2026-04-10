@@ -12,6 +12,9 @@ from pydub import AudioSegment
 from qwen_tts import Qwen3TTSModel, VoiceClonePromptItem
 
 from .config import (
+    BODY_QUALITY_CHECK,
+    BODY_QUALITY_MAX_ATTEMPTS,
+    BODY_QUALITY_REQUIRE_PASS,
     GREETING_ONSET_ARTIFACT_CHECK,
     GREETING_OUTPUT_TRIM_PAD_MS,
     LANGUAGE,
@@ -25,6 +28,7 @@ from .config import (
     REFERENCE_AUDIO_TRIM_MAX_LEADING_MS,
     REFERENCE_AUDIO_TRIM_MAX_TRAILING_MS,
     REFERENCE_AUDIO_TRIM_PAD_MS,
+    body_quality_retry_generate_config,
     greeting_similarity_retry_generate_config,
     voice_clone_generate_config,
 )
@@ -33,6 +37,7 @@ from .config import (
 _MODEL_CACHE: Dict[str, Qwen3TTSModel] = {}
 _VOICE_CLONE_GENERATE_CONFIG = voice_clone_generate_config()
 _GREETING_RETRY_GENERATE_CONFIG = greeting_similarity_retry_generate_config()
+_BODY_RETRY_GENERATE_CONFIG = body_quality_retry_generate_config()
 _H_GREETING_RE = re.compile(r"^\s*(hi|hello)\b", re.IGNORECASE)
 _MODEL_LOCK = threading.RLock()
 _FATAL_CUDA_ERROR_MARKERS = (
@@ -255,6 +260,126 @@ def generate_voice_with_similarity_retry(
     if best_clean_wav is not None:
         return best_clean_wav, best_clean_sr, best_clean_similarity, total_attempts, False, best_clean_quality
     return best_wav, best_sr, best_similarity, total_attempts, False, best_quality
+
+
+def detect_body_boundary_artifacts(text: str, wav: np.ndarray, sr: int) -> Dict[str, float]:
+    audio = _normalize_audio(wav)
+    default = {
+        "checked": 0,
+        "passed": 1,
+        "start_artifact": 0,
+        "trailing_rebound_artifact": 0,
+        "start_gap_ms": 0,
+        "start_first_run_ms": 0,
+        "start_second_run_ms": 0,
+        "tail_gap_ms": 0,
+        "tail_last_run_ms": 0,
+    }
+    if not BODY_QUALITY_CHECK:
+        return default
+    if not isinstance(text, str) or not text.strip():
+        return default
+    if audio.size < max(1, int(sr * 1.6)):
+        return {**default, "checked": 1}
+
+    speech_like, _, hop_samples = _speech_frame_mask(audio, sr=int(sr), frame_ms=20, hop_ms=10)
+    if speech_like.size < 20:
+        return {**default, "checked": 1}
+
+    runs = _active_runs(speech_like, min_run=3)
+    if not runs:
+        return {**default, "checked": 1}
+
+    start_artifact = 0
+    start_gap_ms = 0
+    start_first_run_ms = 0
+    start_second_run_ms = 0
+    early_runs = [run for run in runs if run[0] * hop_samples < int(sr * 1.4)]
+    if len(early_runs) >= 2:
+        first_start, first_end = early_runs[0]
+        second_start, second_end = early_runs[1]
+        first_start_ms = int(round(first_start * hop_samples * 1000.0 / sr))
+        start_gap_ms = int(round((second_start - first_end - 1) * hop_samples * 1000.0 / sr))
+        start_first_run_ms = int(round((first_end - first_start + 1) * hop_samples * 1000.0 / sr))
+        start_second_run_ms = int(round((second_end - second_start + 1) * hop_samples * 1000.0 / sr))
+        start_artifact = int(
+            first_start_ms <= 250
+            and start_first_run_ms <= 420
+            and start_gap_ms >= 120
+            and start_second_run_ms >= 260
+        )
+
+    trailing_rebound_artifact = 0
+    tail_gap_ms = 0
+    tail_last_run_ms = 0
+    late_runs = [run for run in runs if run[1] * hop_samples >= max(0, audio.size - int(sr * 2.0))]
+    if len(late_runs) >= 2:
+        prev_start, prev_end = late_runs[-2]
+        last_start, last_end = late_runs[-1]
+        tail_gap_ms = int(round((last_start - prev_end - 1) * hop_samples * 1000.0 / sr))
+        tail_last_run_ms = int(round((last_end - last_start + 1) * hop_samples * 1000.0 / sr))
+        trailing_from_end_ms = int(round((speech_like.size - 1 - last_end) * hop_samples * 1000.0 / sr))
+        trailing_rebound_artifact = int(
+            tail_gap_ms >= 220
+            and tail_last_run_ms <= 520
+            and trailing_from_end_ms <= 420
+        )
+
+    passed = int(not start_artifact and not trailing_rebound_artifact)
+    return {
+        "checked": 1,
+        "passed": passed,
+        "start_artifact": start_artifact,
+        "trailing_rebound_artifact": trailing_rebound_artifact,
+        "start_gap_ms": start_gap_ms,
+        "start_first_run_ms": start_first_run_ms,
+        "start_second_run_ms": start_second_run_ms,
+        "tail_gap_ms": tail_gap_ms,
+        "tail_last_run_ms": tail_last_run_ms,
+    }
+
+
+def generate_body_with_quality_retry(
+    text: str,
+    voice_prompt: List[VoiceClonePromptItem],
+    max_attempts: Optional[int] = None,
+) -> Tuple[np.ndarray, int, int, bool, Dict[str, float], Dict[str, int]]:
+    total_attempts = max(1, int(max_attempts or BODY_QUALITY_MAX_ATTEMPTS))
+    best_wav = None
+    best_sr = 0
+    best_quality: Dict[str, float] = {
+        "checked": 0,
+        "passed": 1,
+        "start_artifact": 0,
+        "trailing_rebound_artifact": 0,
+    }
+    best_trim: Dict[str, int] = {
+        "trimmed": 0,
+        "leading_ms": 0,
+        "trailing_ms": 0,
+        "original_ms": 0,
+        "cleaned_ms": 0,
+    }
+
+    for attempt in range(1, total_attempts + 1):
+        generate_config = None if attempt == 1 else dict(_BODY_RETRY_GENERATE_CONFIG)
+        wav, sr = generate_voice(text, voice_prompt, generate_config=generate_config)
+        cleaned_wav, cleaned_sr, trim_stats = clean_output_audio(wav, sr)
+        quality = detect_body_boundary_artifacts(text, cleaned_wav, cleaned_sr)
+        if best_wav is None:
+            best_wav = cleaned_wav
+            best_sr = cleaned_sr
+            best_quality = quality
+            best_trim = trim_stats
+        if quality.get("passed", 1):
+            return cleaned_wav, cleaned_sr, attempt, True, quality, trim_stats
+        if not best_quality.get("passed", 1):
+            best_wav = cleaned_wav
+            best_sr = cleaned_sr
+            best_quality = quality
+            best_trim = trim_stats
+
+    return best_wav, best_sr, total_attempts, False, best_quality, best_trim
 
 
 def write_wav_temp(wav: np.ndarray, sr: int) -> str:
@@ -615,6 +740,25 @@ def _find_active_run_end(active: np.ndarray, min_run: int) -> Optional[int]:
         else:
             run = 0
     return None
+
+
+def _active_runs(active: np.ndarray, min_run: int) -> List[Tuple[int, int]]:
+    runs: List[Tuple[int, int]] = []
+    start = None
+    run = 0
+    for idx, value in enumerate(active):
+        if value:
+            if start is None:
+                start = idx
+            run += 1
+            continue
+        if start is not None and run >= min_run:
+            runs.append((start, idx - 1))
+        start = None
+        run = 0
+    if start is not None and run >= min_run:
+        runs.append((start, active.size - 1))
+    return runs
 
 
 def trim_audio_edges(
@@ -1399,11 +1543,9 @@ def splice_speech_segments(
         out = _simple_splice(g, b, sr=sr, pause_ms=pause_ms, crossfade_ms=crossfade_ms)
         return _normalize_loudness_rms(out, target_lufs=target_lufs)
 
-    g_cut = _find_boundary_sample(g, sr=sr, search_from_end=True, window_ms=300)
     b_cut = _find_boundary_sample(b, sr=sr, search_from_end=False, window_ms=300)
-    g_cut = max(0, min(g_cut, g.shape[0]))
     b_cut = max(0, min(b_cut, b.shape[0]))
-    g_trim = g[:g_cut] if g_cut > 0 else g
+    g_trim = g
     b_trim = b[b_cut:] if b_cut < b.shape[0] else b
 
     if b_trim.size == 0:

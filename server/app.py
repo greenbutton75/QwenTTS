@@ -13,11 +13,13 @@ from qwen_tts import VoiceClonePromptItem
 from .config import ADMIN_PASSWORD, ADMIN_USER, LANGUAGE, MODEL_SIZE, S3_PREFIX, SQLITE_PATH
 from .config import voice_clone_generate_config
 from .config import (
+    BODY_QUALITY_REQUIRE_PASS,
     GREETING_ONSET_ARTIFACT_REQUIRE_PASS,
     GREETING_SPEAKER_SIMILARITY_CHECK,
     GREETING_SPEAKER_SIMILARITY_MAX_ATTEMPTS,
     GREETING_SPEAKER_SIMILARITY_REQUIRE_PASS,
     GREETING_SPEAKER_SIMILARITY_THRESHOLD,
+    body_quality_config,
     output_audio_trim_config,
 )
 from .cache_utils import body_cache_hash, prompt_fingerprint
@@ -45,6 +47,7 @@ from .tts import (
     clean_output_audio,
     clean_output_audio_preserve_start,
     clean_output_audio_without_leading_trim,
+    generate_body_with_quality_retry,
     generate_voice,
     generate_voice_with_similarity_retry,
     is_fatal_cuda_error,
@@ -65,6 +68,7 @@ db = TaskDB(SQLITE_PATH)
 worker = Worker(db, logger)
 VOICE_CLONE_GENERATE_CONFIG = voice_clone_generate_config()
 OUTPUT_AUDIO_TRIM_CONFIG = output_audio_trim_config()
+BODY_QUALITY_CONFIG = body_quality_config()
 
 
 def _crash_process_on_fatal_cuda(exc: Exception, context: str) -> None:
@@ -121,6 +125,7 @@ def _body_cache_hash(
         generation_config={
             "voice_clone": dict(VOICE_CLONE_GENERATE_CONFIG),
             "output_trim": dict(OUTPUT_AUDIO_TRIM_CONFIG),
+            "body_quality": dict(BODY_QUALITY_CONFIG),
         },
     )
 
@@ -190,8 +195,12 @@ def _load_or_generate_body_wav(
                 body_hash=body_hash,
                 body_chars=len(body or ""),
             ):
-                body_wav, sr_body = generate_voice(body, voice_prompt)
-                body_wav, sr_body, body_trim = clean_output_audio(body_wav, sr_body)
+                body_wav, sr_body, body_attempts, body_passed, body_quality, body_trim = generate_body_with_quality_retry(
+                    body,
+                    voice_prompt,
+                )
+                if BODY_QUALITY_REQUIRE_PASS and not body_passed:
+                    raise HTTPException(status_code=422, detail="body boundary artifact detected in all attempts")
                 body_bytes = wav_to_bytes(body_wav, int(sr_body))
                 upload_bytes(cache_paths["audio"], body_bytes, "audio/wav")
                 write_json(
@@ -205,6 +214,8 @@ def _load_or_generate_body_wav(
                         "model_size": MODEL_SIZE,
                         "language": LANGUAGE,
                         "generation_config": dict(VOICE_CLONE_GENERATE_CONFIG),
+                        "body_quality": body_quality,
+                        "body_attempts": body_attempts,
                         "output_trim": body_trim,
                         "created_at": int(time.time()),
                     },
@@ -296,8 +307,12 @@ def _synthesize_spliced_phrase(
                 voice_id=voice_id,
                 body_hash=body_hash,
             ):
-                body_wav, sr_body = generate_voice(body, voice_prompt)
-                body_wav, sr_body, body_trim = clean_output_audio(body_wav, sr_body)
+                body_wav, sr_body, body_attempts, body_passed, body_quality, body_trim = generate_body_with_quality_retry(
+                    body,
+                    voice_prompt,
+                )
+                if BODY_QUALITY_REQUIRE_PASS and not body_passed:
+                    raise HTTPException(status_code=422, detail="body boundary artifact detected in all attempts")
                 body_bytes = wav_to_bytes(body_wav, int(sr_body))
                 cache_paths = _body_cache_paths(support_id, voice_id, body_hash)
                 upload_bytes(cache_paths["audio"], body_bytes, "audio/wav")
@@ -312,6 +327,8 @@ def _synthesize_spliced_phrase(
                         "model_size": MODEL_SIZE,
                         "language": LANGUAGE,
                         "generation_config": dict(VOICE_CLONE_GENERATE_CONFIG),
+                        "body_quality": body_quality,
+                        "body_attempts": body_attempts,
                         "output_trim": body_trim,
                         "created_at": int(time.time()),
                     },

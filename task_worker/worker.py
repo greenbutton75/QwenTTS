@@ -50,7 +50,7 @@ timing_logger = setup_timing_logger(
     backups=LOG_BACKUPS,
 )
 GREETING_RE = re.compile(
-    r"^\s*(hi|hello)(?:\s+[!,]?\s*|[!,]\s*)([a-zA-Z][a-zA-Z'\-]*)\s*([!,]?)\s*",
+    r"^\s*(hi|hello)(?:\s+[!,.]?\s*|[!,.]\s*)([a-zA-Z][a-zA-Z'\-]*)\s*([!,.]?)\s*",
     re.IGNORECASE,
 )
 _RETRYABLE_QWEN_API_ERROR_MARKERS = (

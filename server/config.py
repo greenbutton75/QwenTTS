@@ -70,6 +70,14 @@ GREETING_SPEAKER_SIMILARITY_RETRY_DO_SAMPLE = _get_env_bool("GREETING_SPEAKER_SI
 GREETING_SPEAKER_SIMILARITY_RETRY_TEMPERATURE = _get_env_float("GREETING_SPEAKER_SIMILARITY_RETRY_TEMPERATURE", 0.3)
 GREETING_SPEAKER_SIMILARITY_RETRY_TOP_K = _get_env_int("GREETING_SPEAKER_SIMILARITY_RETRY_TOP_K", 8)
 GREETING_SPEAKER_SIMILARITY_RETRY_TOP_P = _get_env_float("GREETING_SPEAKER_SIMILARITY_RETRY_TOP_P", 0.9)
+BODY_QUALITY_CHECK = _get_env_bool("BODY_QUALITY_CHECK", True)
+BODY_QUALITY_REQUIRE_PASS = _get_env_bool("BODY_QUALITY_REQUIRE_PASS", True)
+BODY_QUALITY_MAX_ATTEMPTS = _get_env_int("BODY_QUALITY_MAX_ATTEMPTS", 3)
+BODY_QUALITY_RETRY_DO_SAMPLE = _get_env_bool("BODY_QUALITY_RETRY_DO_SAMPLE", True)
+BODY_QUALITY_RETRY_TEMPERATURE = _get_env_float("BODY_QUALITY_RETRY_TEMPERATURE", 0.25)
+BODY_QUALITY_RETRY_TOP_K = _get_env_int("BODY_QUALITY_RETRY_TOP_K", 6)
+BODY_QUALITY_RETRY_TOP_P = _get_env_float("BODY_QUALITY_RETRY_TOP_P", 0.85)
+BODY_QUALITY_ALGORITHM_VERSION = os.getenv("BODY_QUALITY_ALGORITHM_VERSION", "body_boundary_v1")
 REFERENCE_AUDIO_TRIM_ENABLED = _get_env_bool("REFERENCE_AUDIO_TRIM_ENABLED", True)
 REFERENCE_AUDIO_TRIM_PAD_MS = _get_env_int("REFERENCE_AUDIO_TRIM_PAD_MS", 80)
 REFERENCE_AUDIO_TRIM_MAX_LEADING_MS = _get_env_int("REFERENCE_AUDIO_TRIM_MAX_LEADING_MS", 2500)
@@ -113,6 +121,31 @@ def greeting_similarity_retry_generate_config() -> dict:
             top_p=GREETING_SPEAKER_SIMILARITY_RETRY_TOP_P,
         )
     return config
+
+
+def body_quality_retry_generate_config() -> dict:
+    config = {
+        "do_sample": BODY_QUALITY_RETRY_DO_SAMPLE,
+        "non_streaming_mode": VOICE_CLONE_NON_STREAMING_MODE,
+        "max_new_tokens": VOICE_CLONE_MAX_NEW_TOKENS,
+        "repetition_penalty": VOICE_CLONE_REPETITION_PENALTY,
+    }
+    if BODY_QUALITY_RETRY_DO_SAMPLE:
+        config.update(
+            temperature=BODY_QUALITY_RETRY_TEMPERATURE,
+            top_k=BODY_QUALITY_RETRY_TOP_K,
+            top_p=BODY_QUALITY_RETRY_TOP_P,
+        )
+    return config
+
+
+def body_quality_config() -> dict:
+    return {
+        "enabled": BODY_QUALITY_CHECK,
+        "require_pass": BODY_QUALITY_REQUIRE_PASS,
+        "max_attempts": BODY_QUALITY_MAX_ATTEMPTS,
+        "algorithm_version": BODY_QUALITY_ALGORITHM_VERSION,
+    }
 
 
 def output_audio_trim_config() -> dict:

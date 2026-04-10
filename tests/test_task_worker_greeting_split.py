@@ -63,10 +63,12 @@ class TaskWorkerGreetingSplitTests(unittest.TestCase):
         cases = [
             ("Hi Kevin, this is Fred", ("Hi Kevin,", "this is Fred")),
             ("Hi, Kevin, this is Fred", ("Hi, Kevin,", "this is Fred")),
+            ("Hi, Kevin. this is Fred", ("Hi, Kevin.", "this is Fred")),
             ("Hi , Kevin, this is Fred", ("Hi , Kevin,", "this is Fred")),
             ("Hi! Kevin, this is Fred", ("Hi! Kevin,", "this is Fred")),
             ("Hello Kevin! This is Fred", ("Hello Kevin!", "This is Fred")),
             ("Hello, Kevin! This is Fred", ("Hello, Kevin!", "This is Fred")),
+            ("Hello, Kevin. This is Fred", ("Hello, Kevin.", "This is Fred")),
             ("hello, Kevin! This is Fred", ("hello, Kevin!", "This is Fred")),
             ("Hello,O'Neil! This is Fred", ("Hello,O'Neil!", "This is Fred")),
             ("Hi, Anne-Marie, this is Fred", ("Hi, Anne-Marie,", "this is Fred")),

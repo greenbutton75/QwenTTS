@@ -443,6 +443,92 @@ class ServerGenerationStabilityTests(unittest.TestCase):
         self.assertEqual(stats["checked"], 1)
         self.assertEqual(stats["artifact"], 0)
 
+    def test_detect_body_boundary_artifacts_flags_false_start(self) -> None:
+        sr = 24000
+        wav = np.zeros(int(sr * 2.0), dtype=np.float32)
+        mask = np.zeros(200, dtype=bool)
+        mask[0:18] = True
+        mask[32:88] = True
+        with patch.object(server_tts, "_speech_frame_mask", return_value=(mask, int(sr * 0.02), int(sr * 0.01))):
+            stats = server_tts.detect_body_boundary_artifacts("I hope you're doing well today.", wav, sr)
+
+        self.assertEqual(stats["checked"], 1)
+        self.assertEqual(stats["start_artifact"], 1)
+        self.assertEqual(stats["passed"], 0)
+
+    def test_detect_body_boundary_artifacts_flags_trailing_rebound(self) -> None:
+        sr = 24000
+        wav = np.zeros(int(sr * 2.3), dtype=np.float32)
+        mask = np.zeros(230, dtype=bool)
+        mask[10:150] = True
+        mask[175:196] = True
+        with patch.object(server_tts, "_speech_frame_mask", return_value=(mask, int(sr * 0.02), int(sr * 0.01))):
+            stats = server_tts.detect_body_boundary_artifacts("I hope you're doing well today.", wav, sr)
+
+        self.assertEqual(stats["checked"], 1)
+        self.assertEqual(stats["trailing_rebound_artifact"], 1)
+        self.assertEqual(stats["passed"], 0)
+
+    def test_detect_body_boundary_artifacts_allows_clean_body(self) -> None:
+        sr = 24000
+        wav = np.zeros(int(sr * 2.2), dtype=np.float32)
+        mask = np.zeros(220, dtype=bool)
+        mask[8:205] = True
+        with patch.object(server_tts, "_speech_frame_mask", return_value=(mask, int(sr * 0.02), int(sr * 0.01))):
+            stats = server_tts.detect_body_boundary_artifacts("I hope you're doing well today.", wav, sr)
+
+        self.assertEqual(stats["checked"], 1)
+        self.assertEqual(stats["passed"], 1)
+        self.assertEqual(stats["start_artifact"], 0)
+        self.assertEqual(stats["trailing_rebound_artifact"], 0)
+
+    def test_generate_body_with_quality_retry_retries_after_bad_candidate(self) -> None:
+        wav_bad = np.full(16, 0.1, dtype=np.float32)
+        wav_good = np.full(16, 0.2, dtype=np.float32)
+        trim_stats = {"trimmed": 0, "leading_ms": 0, "trailing_ms": 0, "original_ms": 1, "cleaned_ms": 1}
+        with patch.object(server_tts, "generate_voice", side_effect=[(wav_bad, 24000), (wav_good, 24000)]) as generate_mock, \
+             patch.object(server_tts, "clean_output_audio", side_effect=[(wav_bad, 24000, trim_stats), (wav_good, 24000, trim_stats)]), \
+             patch.object(
+                 server_tts,
+                 "detect_body_boundary_artifacts",
+                 side_effect=[
+                     {"checked": 1, "passed": 0, "start_artifact": 1, "trailing_rebound_artifact": 0},
+                     {"checked": 1, "passed": 1, "start_artifact": 0, "trailing_rebound_artifact": 0},
+                 ],
+             ):
+            out_wav, sr, attempts, passed, quality, out_trim = server_tts.generate_body_with_quality_retry(
+                "I hope you're doing well today.",
+                ["prompt"],
+                max_attempts=3,
+            )
+
+        self.assertTrue(np.array_equal(out_wav, wav_good))
+        self.assertEqual(sr, 24000)
+        self.assertEqual(attempts, 2)
+        self.assertTrue(passed)
+        self.assertEqual(quality["passed"], 1)
+        self.assertEqual(out_trim, trim_stats)
+        self.assertIsNone(generate_mock.call_args_list[0].kwargs.get("generate_config"))
+        self.assertEqual(generate_mock.call_args_list[1].kwargs.get("generate_config"), server_tts._BODY_RETRY_GENERATE_CONFIG)
+
+    def test_content_aware_splice_preserves_full_greeting_tail(self) -> None:
+        greeting = np.array([0.1, 0.2, 0.3, 0.4], dtype=np.float32)
+        body = np.array([0.5, 0.6, 0.7], dtype=np.float32)
+        with patch.object(server_tts, "_find_boundary_sample", return_value=1), \
+             patch.object(server_tts, "_normalize_loudness_rms", side_effect=lambda signal, target_lufs: signal):
+            out = server_tts.splice_speech_segments(
+                greeting_wav=greeting,
+                body_wav=body,
+                sample_rate=24000,
+                pause_ms=0,
+                crossfade_ms=0,
+                content_aware=True,
+                target_lufs=-16.0,
+            )
+
+        expected = np.concatenate([greeting, body[1:]], axis=0)
+        self.assertTrue(np.array_equal(out, expected))
+
 
 if __name__ == "__main__":
     unittest.main()
