@@ -158,6 +158,10 @@ The server-side output cleanup was extended to handle real production failures:
   - `PHRASE_POLL_INTERVAL` default changed from `15` to `5`
   - `POST /phrases` and `POST /phrases/splice-prod` submit timeouts default to `150s`
   - health/status timeouts are configurable separately
+- timing coverage was extended for investigation of long non-GPU pauses:
+  - `task_worker_timing.log` now records production task API calls such as `list_tasks`, `update_progress`, and task completion/failure updates
+  - `task_worker.process_phrases.prepare` measures the batch-preparation window before the first splice/full submission
+  - this helps distinguish real idle/recovery windows from time spent in external task API, parsing, S3 profile checks, and grouping
 
 New relevant env:
 
@@ -205,3 +209,5 @@ The worker loop catches unexpected errors (e.g., DNS failures) and retries with 
 
 
 Note: task listing uses SYSTEM_TOKEN + FINGERPRINT so it can see tasks created by other users.
+
+See also: `docs/voice_recovery_runbook.md`

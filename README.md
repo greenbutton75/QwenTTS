@@ -419,6 +419,7 @@ See `docs/watchdog.md` for configuration, recovery logic, and required env overr
 - `docs/vastai.md` — Vast.ai deployment + e2e check
 - `docs/task_worker_deploy.md` — task_worker deployment notes
 - `docs/splice_strategy_notes.md` — greeting/body splice strategy, cache, rollout
+- `docs/voice_recovery_runbook.md` — safe recovery steps for one bad `voice_id` in production
 
 ## Update (2026-03-13)
 
@@ -505,6 +506,10 @@ See `docs/watchdog.md` for configuration, recovery logic, and required env overr
   - вызовы `task_worker -> API` получили отдельные timeout env;
   - default timeout для `POST /phrases` и `POST /phrases/splice-prod` уменьшен до `150` секунд;
   - worker теперь быстрее замечает готовые фразы и меньше времени теряет на подвисших splice/full запросах.
+- Расширено timing-логирование для расследования idle / slow batch windows:
+  - в `task_worker_timing.log` теперь логируются не только вызовы к локальному API, но и обращения к production task API (`Tasks/List`, `ChangeTaskProgress`, `CompleteTask`);
+  - добавлен отдельный span подготовки batch: `task_worker.process_phrases.prepare`;
+  - теперь можно отличить GPU-idle из-за real backoff/recovery от времени, ушедшего в list/parsing/profile-ready checks/grouping.
 
 Новые/важные env для контроля поведения:
 

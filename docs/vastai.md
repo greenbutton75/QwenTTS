@@ -322,6 +322,10 @@ Production audio postprocess was strengthened after real cases with multi-second
   - `PHRASE_POLL_INTERVAL` now defaults to `5`
   - phrase/splice API submit timeouts now default to `150s`
   - health/status timeouts are configurable separately
+- timing instrumentation was extended for slow-batch расследование:
+  - `task_worker_timing.log` now includes production task API calls such as `Tasks/List`, progress updates, and task completion calls
+  - `task_worker.process_phrases.prepare` shows how much time is spent before the first splice/full submission
+  - this makes it possible to separate real GPU idle from batch parsing, profile-ready checks, grouping, and external task API latency
 
 Relevant greeting-start env:
 
@@ -383,3 +387,5 @@ Default behavior:
 - waits for a stability window before accepting a replacement as healthy
 
 Full details: `docs/watchdog.md`
+
+For one-voice production recovery, use `docs/voice_recovery_runbook.md`.

@@ -349,41 +349,66 @@ def process_phrases_batch(state: HealthState) -> None:
             return
 
         parsed: List[Dict[str, Any]] = []
-        for rec in tasks:
-            task_id = task_id_from_record(rec)
-            params = task_params_from_record(rec)
-            support_id = params.get("support_id")
-            voice_id = params.get("voice_id")
-            phrase_id = params.get("phrase_id")
-            text = params.get("text")
-            if not support_id or not voice_id or not phrase_id or not text:
-                failed_task(task_id, error="missing support_id/voice_id/phrase_id/text")
-                state.inc_phrase_failed()
-                continue
-            if not _profile_ready_in_s3(support_id, voice_id):
-                continue
-            split = _split_greeting_body(text) if _use_splice_grouping_for_support(support_id) else None
-            parsed.append(
-                {
-                    "task_id": task_id,
-                    "support_id": support_id,
-                    "voice_id": voice_id,
-                    "phrase_id": phrase_id,
-                    "text": text,
-                    "split": split,
-                }
-            )
+        with timed_operation(
+            timing_logger,
+            "task_worker.process_phrases.prepare",
+            listed_tasks=len(tasks),
+        ) as prepare_span:
+            profile_ready_checks = 0
+            profile_not_ready = 0
+            invalid_tasks = 0
+            split_candidates = 0
+            for rec in tasks:
+                task_id = task_id_from_record(rec)
+                params = task_params_from_record(rec)
+                support_id = params.get("support_id")
+                voice_id = params.get("voice_id")
+                phrase_id = params.get("phrase_id")
+                text = params.get("text")
+                if not support_id or not voice_id or not phrase_id or not text:
+                    failed_task(task_id, error="missing support_id/voice_id/phrase_id/text")
+                    state.inc_phrase_failed()
+                    invalid_tasks += 1
+                    continue
+                profile_ready_checks += 1
+                if not _profile_ready_in_s3(support_id, voice_id):
+                    profile_not_ready += 1
+                    continue
+                split = _split_greeting_body(text) if _use_splice_grouping_for_support(support_id) else None
+                if split:
+                    split_candidates += 1
+                parsed.append(
+                    {
+                        "task_id": task_id,
+                        "support_id": support_id,
+                        "voice_id": voice_id,
+                        "phrase_id": phrase_id,
+                        "text": text,
+                        "split": split,
+                    }
+                )
 
-        groups: Dict[Tuple[str, str, str], List[Dict[str, Any]]] = defaultdict(list)
-        for item in parsed:
-            split = item.get("split")
-            if not split:
-                continue
-            greeting, body = split
-            body_key = _normalize_body_for_grouping(body)
-            if not body_key:
-                continue
-            groups[(item["support_id"], item["voice_id"], body_key)].append(item)
+            groups: Dict[Tuple[str, str, str], List[Dict[str, Any]]] = defaultdict(list)
+            groupable_items = 0
+            for item in parsed:
+                split = item.get("split")
+                if not split:
+                    continue
+                greeting, body = split
+                body_key = _normalize_body_for_grouping(body)
+                if not body_key:
+                    continue
+                groupable_items += 1
+                groups[(item["support_id"], item["voice_id"], body_key)].append(item)
+            prepare_span.set(
+                parsed_tasks=len(parsed),
+                invalid_tasks=invalid_tasks,
+                profile_ready_checks=profile_ready_checks,
+                profile_not_ready=profile_not_ready,
+                split_candidates=split_candidates,
+                groupable_items=groupable_items,
+                grouping_keys=len(groups),
+            )
 
         grouped_task_ids = set()
         splice_group_count = 0
