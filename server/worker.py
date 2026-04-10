@@ -213,10 +213,14 @@ class Worker:
                 "onset_artifact": 0,
                 "onset_checked": 0,
                 "onset_passed": 1,
+                "ending_artifact": 0,
+                "ending_checked": 0,
+                "ending_passed": 1,
                 "preroll_artifact": 0,
                 "preroll_checked": 0,
                 "preroll_passed": 1,
                 "start_passed": 1,
+                "greeting_passed": 1,
             }
             with timed_operation(self.timing_logger, "api.worker.phrase.generate", support_id=support_id, voice_id=voice_id, phrase_id=phrase_id):
                 if isinstance(text, str) and text.strip().lower().startswith(("hi ", "hi,", "hello ", "hello,")):
@@ -239,8 +243,11 @@ class Worker:
                             "phrase greeting speaker similarity below threshold: "
                             f"{greeting_similarity:.4f} < {GREETING_SPEAKER_SIMILARITY_THRESHOLD:.4f}"
                         )
-                    if GREETING_ONSET_ARTIFACT_REQUIRE_PASS and not greeting_quality.get("start_passed", 1):
-                        raise RuntimeError("phrase greeting start artifact detected in all attempts")
+                    if GREETING_ONSET_ARTIFACT_REQUIRE_PASS and not greeting_quality.get(
+                        "greeting_passed",
+                        greeting_quality.get("start_passed", 1),
+                    ):
+                        raise RuntimeError("phrase greeting quality artifact detected in all attempts")
                     wav, sr, output_trim = clean_output_audio_preserve_start(wav, sr)
                 else:
                     wav, sr = generate_voice(text, voice_prompt)
@@ -265,10 +272,14 @@ class Worker:
                     "greeting_onset_checked": bool(greeting_quality.get("onset_checked", 0)),
                     "greeting_onset_passed": bool(greeting_quality.get("onset_passed", 1)),
                     "greeting_onset_artifact": bool(greeting_quality.get("onset_artifact", 0)),
+                    "greeting_ending_checked": bool(greeting_quality.get("ending_checked", 0)),
+                    "greeting_ending_passed": bool(greeting_quality.get("ending_passed", 1)),
+                    "greeting_ending_artifact": bool(greeting_quality.get("ending_artifact", 0)),
                     "greeting_preroll_checked": bool(greeting_quality.get("preroll_checked", 0)),
                     "greeting_preroll_passed": bool(greeting_quality.get("preroll_passed", 1)),
                     "greeting_preroll_artifact": bool(greeting_quality.get("preroll_artifact", 0)),
                     "greeting_start_passed": bool(greeting_quality.get("start_passed", 1)),
+                    "greeting_passed": bool(greeting_quality.get("greeting_passed", greeting_quality.get("start_passed", 1))),
                     "output_trim": output_trim,
                     "updated_at": int(time.time()),
                 }

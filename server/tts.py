@@ -39,6 +39,7 @@ _VOICE_CLONE_GENERATE_CONFIG = voice_clone_generate_config()
 _GREETING_RETRY_GENERATE_CONFIG = greeting_similarity_retry_generate_config()
 _BODY_RETRY_GENERATE_CONFIG = body_quality_retry_generate_config()
 _H_GREETING_RE = re.compile(r"^\s*(hi|hello)\b", re.IGNORECASE)
+_SHORT_GREETING_RE = re.compile(r"^\s*(hi|hello)\s*[!,]?\s*([a-zA-Z][a-zA-Z'\-]*)\s*[!,.]?\s*$", re.IGNORECASE)
 _MODEL_LOCK = threading.RLock()
 _FATAL_CUDA_ERROR_MARKERS = (
     "device-side assert triggered",
@@ -214,10 +215,14 @@ def generate_voice_with_similarity_retry(
         "onset_artifact": 0,
         "onset_checked": 0,
         "onset_passed": 1,
+        "ending_artifact": 0,
+        "ending_checked": 0,
+        "ending_passed": 1,
         "preroll_artifact": 0,
         "preroll_checked": 0,
         "preroll_passed": 1,
         "start_passed": 1,
+        "greeting_passed": 1,
     }
     best_clean_wav = None
     best_clean_sr = 0
@@ -230,18 +235,25 @@ def generate_voice_with_similarity_retry(
         similarity = speaker_similarity(wav, sr, reference_embedding)
         onset_stats = detect_greeting_onset_artifact(text, wav, sr)
         preroll_stats = detect_greeting_leading_preroll_artifact(text, wav, sr)
+        ending_stats = detect_greeting_clipped_ending_artifact(text, wav, sr)
         onset_passed = int(not onset_stats.get("artifact", 0))
         preroll_passed = int(not preroll_stats.get("artifact", 0))
+        ending_passed = int(not ending_stats.get("artifact", 0))
         quality = {
             "similarity_passed": int(similarity >= float(min_similarity)),
             "onset_artifact": int(onset_stats.get("artifact", 0)),
             "onset_checked": int(onset_stats.get("checked", 0)),
             "onset_passed": onset_passed,
+            "ending_artifact": int(ending_stats.get("artifact", 0)),
+            "ending_checked": int(ending_stats.get("checked", 0)),
+            "ending_passed": ending_passed,
             "preroll_artifact": int(preroll_stats.get("artifact", 0)),
             "preroll_checked": int(preroll_stats.get("checked", 0)),
             "preroll_passed": preroll_passed,
             "start_passed": int(onset_passed and preroll_passed),
+            "greeting_passed": int(onset_passed and preroll_passed and ending_passed),
             **onset_stats,
+            **{f"ending_{key}": value for key, value in ending_stats.items() if key not in {"artifact", "checked"}},
             **{f"preroll_{key}": value for key, value in preroll_stats.items() if key not in {"artifact", "checked"}},
         }
         if similarity > best_similarity or best_wav is None:
@@ -249,12 +261,12 @@ def generate_voice_with_similarity_retry(
             best_sr = sr
             best_similarity = similarity
             best_quality = quality
-        if quality["start_passed"] and (similarity > best_clean_similarity or best_clean_wav is None):
+        if quality["greeting_passed"] and (similarity > best_clean_similarity or best_clean_wav is None):
             best_clean_wav = wav
             best_clean_sr = sr
             best_clean_similarity = similarity
             best_clean_quality = quality
-        if similarity >= float(min_similarity) and quality["start_passed"]:
+        if similarity >= float(min_similarity) and quality["greeting_passed"]:
             return wav, sr, similarity, attempt, True, quality
 
     if best_clean_wav is not None:
@@ -718,6 +730,91 @@ def detect_greeting_leading_preroll_artifact(text: str, wav: np.ndarray, sr: int
         "global_p95_rms": global_p95,
         "leading_to_global_ratio": leading_to_global_ratio,
         "preroll_to_global_ratio": preroll_to_global_ratio,
+    }
+
+
+def detect_greeting_clipped_ending_artifact(text: str, wav: np.ndarray, sr: int) -> Dict[str, float]:
+    audio = _normalize_audio(wav)
+    default = {
+        "artifact": 0,
+        "checked": 0,
+        "duration_ms": 0,
+        "expected_min_ms": 0,
+        "tail_mean_rms": 0.0,
+        "pre_tail_mean_rms": 0.0,
+        "tail_to_pre_ratio": 0.0,
+        "tail_to_global_ratio": 0.0,
+        "tail_speech_ratio": 0.0,
+        "tail_run_ms": 0,
+    }
+    if not GREETING_ONSET_ARTIFACT_CHECK:
+        return default
+
+    match = _SHORT_GREETING_RE.match(text or "")
+    if not match:
+        return default
+    if audio.size < max(1, int(sr * 0.14)):
+        return {**default, "checked": 1, "duration_ms": int(round(audio.shape[0] * 1000.0 / max(int(sr), 1)))}
+
+    greeting_word = (match.group(1) or "").strip().lower()
+    name_letters = re.sub(r"[^a-zA-Z]", "", match.group(2) or "")
+    letter_count = max(1, len(name_letters)) + (2 if greeting_word == "hello" else 1)
+    duration_ms = int(round(audio.shape[0] * 1000.0 / sr))
+    expected_min_ms = int(min(950, max(430, 360 + letter_count * 32)))
+
+    speech_like, frame_samples, hop_samples = _speech_frame_mask(audio, sr=int(sr), frame_ms=20, hop_ms=10)
+    rms = _rms_envelope(audio, frame_samples=frame_samples, hop_samples=hop_samples)
+    min_len = min(rms.size, speech_like.size)
+    if min_len < 8:
+        return {
+            **default,
+            "checked": 1,
+            "duration_ms": duration_ms,
+            "expected_min_ms": expected_min_ms,
+        }
+    rms = rms[:min_len]
+    speech_like = speech_like[:min_len]
+
+    tail_frames = max(4, int(round(0.08 * sr / hop_samples)))
+    pre_tail_frames = max(tail_frames, int(round(0.12 * sr / hop_samples)))
+    tail = rms[-tail_frames:]
+    pre_tail_end = max(0, rms.size - tail_frames)
+    pre_tail_start = max(0, pre_tail_end - pre_tail_frames)
+    pre_tail = rms[pre_tail_start:pre_tail_end]
+    if pre_tail.size == 0:
+        pre_tail = rms[:-tail_frames] if rms.size > tail_frames else rms
+
+    tail_mean = float(np.mean(tail)) if tail.size else 0.0
+    pre_tail_mean = float(np.mean(pre_tail)) if pre_tail.size else 0.0
+    global_p90 = float(np.percentile(rms, 90))
+    tail_to_pre_ratio = tail_mean / max(pre_tail_mean, 1e-6)
+    tail_to_global_ratio = tail_mean / max(global_p90, 1e-6)
+    tail_speech_ratio = float(np.mean(speech_like[-tail_frames:])) if tail_frames > 0 else 0.0
+
+    tail_run_ms = 0
+    runs = _active_runs(speech_like, min_run=1)
+    if runs:
+        last_start, last_end = runs[-1]
+        if last_end >= speech_like.size - tail_frames - 1:
+            tail_run_ms = int(round((last_end - last_start + 1) * hop_samples * 1000.0 / sr))
+
+    artifact = int(
+        duration_ms <= expected_min_ms
+        and tail_speech_ratio >= 0.65
+        and tail_to_pre_ratio >= 0.82
+        and tail_to_global_ratio >= 0.42
+    )
+    return {
+        "artifact": artifact,
+        "checked": 1,
+        "duration_ms": duration_ms,
+        "expected_min_ms": expected_min_ms,
+        "tail_mean_rms": tail_mean,
+        "pre_tail_mean_rms": pre_tail_mean,
+        "tail_to_pre_ratio": tail_to_pre_ratio,
+        "tail_to_global_ratio": tail_to_global_ratio,
+        "tail_speech_ratio": tail_speech_ratio,
+        "tail_run_ms": tail_run_ms,
     }
 
 

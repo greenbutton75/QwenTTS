@@ -255,10 +255,14 @@ def _synthesize_spliced_phrase(
             "onset_artifact": 0,
             "onset_checked": 0,
             "onset_passed": 1,
+            "ending_artifact": 0,
+            "ending_checked": 0,
+            "ending_passed": 1,
             "preroll_artifact": 0,
             "preroll_checked": 0,
             "preroll_passed": 1,
             "start_passed": 1,
+            "greeting_passed": 1,
         }
         with timed_operation(
             timing_logger,
@@ -286,8 +290,11 @@ def _synthesize_spliced_phrase(
                             f"{greeting_similarity:.4f} < {GREETING_SPEAKER_SIMILARITY_THRESHOLD:.4f}"
                         ),
                     )
-                if GREETING_ONSET_ARTIFACT_REQUIRE_PASS and not greeting_quality.get("start_passed", 1):
-                    raise HTTPException(status_code=422, detail="greeting start artifact detected in all attempts")
+                if GREETING_ONSET_ARTIFACT_REQUIRE_PASS and not greeting_quality.get(
+                    "greeting_passed",
+                    greeting_quality.get("start_passed", 1),
+                ):
+                    raise HTTPException(status_code=422, detail="greeting quality artifact detected in all attempts")
                 greeting_wav, sr_greeting, _ = clean_output_audio_preserve_start(greeting_wav, sr_greeting)
             else:
                 greeting_wav, sr_greeting = generate_voice(greeting, voice_prompt)
@@ -362,6 +369,7 @@ def _synthesize_spliced_phrase(
             greeting_similarity=greeting_similarity,
             greeting_similarity_passed=greeting_similarity_passed,
             greeting_start_passed=bool(greeting_quality.get("start_passed", 1)),
+            greeting_passed=bool(greeting_quality.get("greeting_passed", greeting_quality.get("start_passed", 1))),
             splice_strategy=splice_strategy,
         )
         return (
@@ -642,10 +650,14 @@ def splice_test_phrase(req: SpliceTestRequest) -> Response:
                 "X-Greeting-Onset-Checked": str(bool(greeting_quality.get("onset_checked", 0))).lower(),
                 "X-Greeting-Onset-Passed": str(bool(greeting_quality.get("onset_passed", 1))).lower(),
                 "X-Greeting-Onset-Artifact": str(bool(greeting_quality.get("onset_artifact", 0))).lower(),
+                "X-Greeting-Ending-Checked": str(bool(greeting_quality.get("ending_checked", 0))).lower(),
+                "X-Greeting-Ending-Passed": str(bool(greeting_quality.get("ending_passed", 1))).lower(),
+                "X-Greeting-Ending-Artifact": str(bool(greeting_quality.get("ending_artifact", 0))).lower(),
                 "X-Greeting-Preroll-Checked": str(bool(greeting_quality.get("preroll_checked", 0))).lower(),
                 "X-Greeting-Preroll-Passed": str(bool(greeting_quality.get("preroll_passed", 1))).lower(),
                 "X-Greeting-Preroll-Artifact": str(bool(greeting_quality.get("preroll_artifact", 0))).lower(),
                 "X-Greeting-Start-Passed": str(bool(greeting_quality.get("start_passed", 1))).lower(),
+                "X-Greeting-Passed": str(bool(greeting_quality.get("greeting_passed", greeting_quality.get("start_passed", 1)))).lower(),
                 "X-Output-Trim-Leading-Ms": str(output_trim["leading_ms"]),
                 "X-Output-Trim-Trailing-Ms": str(output_trim["trailing_ms"]),
                 "X-Output-Trim-Applied": str(bool(output_trim["trimmed"])).lower(),
@@ -743,10 +755,14 @@ def create_phrase_splice_prod(req: CreateSplicePhraseRequest) -> CreatePhraseRes
                         "greeting_onset_checked": bool(greeting_quality.get("onset_checked", 0)),
                         "greeting_onset_passed": bool(greeting_quality.get("onset_passed", 1)),
                         "greeting_onset_artifact": bool(greeting_quality.get("onset_artifact", 0)),
+                        "greeting_ending_checked": bool(greeting_quality.get("ending_checked", 0)),
+                        "greeting_ending_passed": bool(greeting_quality.get("ending_passed", 1)),
+                        "greeting_ending_artifact": bool(greeting_quality.get("ending_artifact", 0)),
                         "greeting_preroll_checked": bool(greeting_quality.get("preroll_checked", 0)),
                         "greeting_preroll_passed": bool(greeting_quality.get("preroll_passed", 1)),
                         "greeting_preroll_artifact": bool(greeting_quality.get("preroll_artifact", 0)),
                         "greeting_start_passed": bool(greeting_quality.get("start_passed", 1)),
+                        "greeting_passed": bool(greeting_quality.get("greeting_passed", greeting_quality.get("start_passed", 1))),
                         "output_trim": output_trim,
                         "updated_at": int(time.time()),
                     },
