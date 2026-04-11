@@ -281,11 +281,17 @@ def detect_body_boundary_artifacts(text: str, wav: np.ndarray, sr: int) -> Dict[
         "passed": 1,
         "start_artifact": 0,
         "trailing_rebound_artifact": 0,
+        "clipped_ending_artifact": 0,
         "start_gap_ms": 0,
         "start_first_run_ms": 0,
         "start_second_run_ms": 0,
         "tail_gap_ms": 0,
         "tail_last_run_ms": 0,
+        "duration_ms": 0,
+        "expected_min_ms": 0,
+        "ending_tail_speech_ratio": 0.0,
+        "ending_tail_to_pre_ratio": 0.0,
+        "ending_tail_to_global_ratio": 0.0,
     }
     if not BODY_QUALITY_CHECK:
         return default
@@ -337,17 +343,61 @@ def detect_body_boundary_artifacts(text: str, wav: np.ndarray, sr: int) -> Dict[
             and trailing_from_end_ms <= 420
         )
 
-    passed = int(not start_artifact and not trailing_rebound_artifact)
+    clipped_ending_artifact = 0
+    duration_ms = int(round(audio.shape[0] * 1000.0 / sr))
+    expected_min_ms = 0
+    ending_tail_speech_ratio = 0.0
+    ending_tail_to_pre_ratio = 0.0
+    ending_tail_to_global_ratio = 0.0
+    stripped_text = text.strip()
+    if stripped_text.endswith((".", "!", "?")):
+        word_count = len(re.findall(r"[A-Za-z0-9]+(?:['-][A-Za-z0-9]+)?", stripped_text))
+        char_count = len(re.findall(r"[A-Za-z0-9]", stripped_text))
+        expected_min_ms = int(min(25000, max(3000, max(word_count * 220, char_count * 42))))
+
+        rms = _rms_envelope(audio, frame_samples=int(sr * 0.02), hop_samples=hop_samples)
+        min_len = min(rms.size, speech_like.size)
+        if min_len >= 8:
+            rms = rms[:min_len]
+            speech_like_tail = speech_like[:min_len]
+            tail_frames = max(4, int(round(0.12 * sr / hop_samples)))
+            pre_tail_frames = max(tail_frames, int(round(0.20 * sr / hop_samples)))
+            tail = rms[-tail_frames:]
+            pre_tail_end = max(0, rms.size - tail_frames)
+            pre_tail_start = max(0, pre_tail_end - pre_tail_frames)
+            pre_tail = rms[pre_tail_start:pre_tail_end]
+            if pre_tail.size == 0:
+                pre_tail = rms[:-tail_frames] if rms.size > tail_frames else rms
+            ending_tail_speech_ratio = float(np.mean(speech_like_tail[-tail_frames:])) if tail_frames > 0 else 0.0
+            tail_mean = float(np.mean(tail)) if tail.size else 0.0
+            pre_tail_mean = float(np.mean(pre_tail)) if pre_tail.size else 0.0
+            global_p90 = float(np.percentile(rms, 90))
+            ending_tail_to_pre_ratio = tail_mean / max(pre_tail_mean, 1e-6)
+            ending_tail_to_global_ratio = tail_mean / max(global_p90, 1e-6)
+            clipped_ending_artifact = int(
+                duration_ms <= expected_min_ms
+                and ending_tail_speech_ratio >= 0.72
+                and ending_tail_to_pre_ratio >= 0.88
+                and ending_tail_to_global_ratio >= 0.34
+            )
+
+    passed = int(not start_artifact and not trailing_rebound_artifact and not clipped_ending_artifact)
     return {
         "checked": 1,
         "passed": passed,
         "start_artifact": start_artifact,
         "trailing_rebound_artifact": trailing_rebound_artifact,
+        "clipped_ending_artifact": clipped_ending_artifact,
         "start_gap_ms": start_gap_ms,
         "start_first_run_ms": start_first_run_ms,
         "start_second_run_ms": start_second_run_ms,
         "tail_gap_ms": tail_gap_ms,
         "tail_last_run_ms": tail_last_run_ms,
+        "duration_ms": duration_ms,
+        "expected_min_ms": expected_min_ms,
+        "ending_tail_speech_ratio": ending_tail_speech_ratio,
+        "ending_tail_to_pre_ratio": ending_tail_to_pre_ratio,
+        "ending_tail_to_global_ratio": ending_tail_to_global_ratio,
     }
 
 
@@ -364,6 +414,7 @@ def generate_body_with_quality_retry(
         "passed": 1,
         "start_artifact": 0,
         "trailing_rebound_artifact": 0,
+        "clipped_ending_artifact": 0,
     }
     best_trim: Dict[str, int] = {
         "trimmed": 0,

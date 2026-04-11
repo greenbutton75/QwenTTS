@@ -554,6 +554,43 @@ class ServerGenerationStabilityTests(unittest.TestCase):
         self.assertEqual(stats["start_artifact"], 0)
         self.assertEqual(stats["trailing_rebound_artifact"], 0)
 
+    def test_detect_body_boundary_artifacts_flags_clipped_ending(self) -> None:
+        sr = 24000
+        text = (
+            "I hope your day is going well. I would like to get a few minutes of your time "
+            "to learn more about your business and your retirement plan. "
+            "Do you have 15-20 minutes over the next week or two?"
+        )
+        wav = np.zeros(int(sr * 6.0), dtype=np.float32)
+        mask = np.ones(600, dtype=bool)
+        rms = np.full((600,), 0.08, dtype=np.float32)
+        with patch.object(server_tts, "_speech_frame_mask", return_value=(mask, int(sr * 0.02), int(sr * 0.01))), \
+             patch.object(server_tts, "_rms_envelope", return_value=rms):
+            stats = server_tts.detect_body_boundary_artifacts(text, wav, sr)
+
+        self.assertEqual(stats["checked"], 1)
+        self.assertEqual(stats["clipped_ending_artifact"], 1)
+        self.assertEqual(stats["passed"], 0)
+        self.assertGreater(stats["expected_min_ms"], stats["duration_ms"])
+
+    def test_detect_body_boundary_artifacts_allows_long_complete_ending(self) -> None:
+        sr = 24000
+        text = (
+            "I hope your day is going well. I would like to get a few minutes of your time "
+            "to learn more about your business and your retirement plan. "
+            "Do you have 15-20 minutes over the next week or two?"
+        )
+        wav = np.zeros(int(sr * 10.0), dtype=np.float32)
+        mask = np.ones(1000, dtype=bool)
+        rms = np.full((1000,), 0.08, dtype=np.float32)
+        with patch.object(server_tts, "_speech_frame_mask", return_value=(mask, int(sr * 0.02), int(sr * 0.01))), \
+             patch.object(server_tts, "_rms_envelope", return_value=rms):
+            stats = server_tts.detect_body_boundary_artifacts(text, wav, sr)
+
+        self.assertEqual(stats["checked"], 1)
+        self.assertEqual(stats["clipped_ending_artifact"], 0)
+        self.assertEqual(stats["passed"], 1)
+
     def test_generate_body_with_quality_retry_retries_after_bad_candidate(self) -> None:
         wav_bad = np.full(16, 0.1, dtype=np.float32)
         wav_good = np.full(16, 0.2, dtype=np.float32)
@@ -564,8 +601,8 @@ class ServerGenerationStabilityTests(unittest.TestCase):
                  server_tts,
                  "detect_body_boundary_artifacts",
                  side_effect=[
-                     {"checked": 1, "passed": 0, "start_artifact": 1, "trailing_rebound_artifact": 0},
-                     {"checked": 1, "passed": 1, "start_artifact": 0, "trailing_rebound_artifact": 0},
+                     {"checked": 1, "passed": 0, "start_artifact": 1, "trailing_rebound_artifact": 0, "clipped_ending_artifact": 0},
+                     {"checked": 1, "passed": 1, "start_artifact": 0, "trailing_rebound_artifact": 0, "clipped_ending_artifact": 0},
                  ],
              ):
             out_wav, sr, attempts, passed, quality, out_trim = server_tts.generate_body_with_quality_retry(
