@@ -47,6 +47,7 @@ from .tts import (
     clean_output_audio,
     clean_output_audio_preserve_start,
     clean_output_audio_for_greeting,
+    clean_output_audio_for_spliced_phrase,
     clean_output_audio_without_leading_trim,
     generate_body_with_quality_retry,
     generate_voice,
@@ -362,7 +363,7 @@ def _synthesize_spliced_phrase(
                 content_aware=content_aware,
                 target_lufs=target_lufs,
             )
-            merged_wav, merged_sr, output_trim = clean_output_audio_without_leading_trim(merged_wav, int(sr_greeting))
+            merged_wav, merged_sr, output_trim = clean_output_audio_for_spliced_phrase(merged_wav, int(sr_greeting))
         span.set(
             body_hash=body_hash,
             body_cache_hit=body_cache_hit,

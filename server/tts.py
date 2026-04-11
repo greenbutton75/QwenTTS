@@ -1603,6 +1603,58 @@ def clean_output_audio_without_leading_trim(wav: np.ndarray, sr: int) -> Tuple[n
     )
 
 
+def clean_output_audio_for_spliced_phrase(wav: np.ndarray, sr: int) -> Tuple[np.ndarray, int, Dict[str, int]]:
+    audio = _normalize_audio(wav)
+    original_ms = int(round(audio.shape[0] * 1000.0 / sr)) if sr else 0
+    if not OUTPUT_AUDIO_TRIM_ENABLED:
+        stats = {
+            "trimmed": 0,
+            "leading_ms": 0,
+            "trailing_ms": 0,
+            "boundary_artifact_trimmed": 0,
+            "boundary_leading_ms": 0,
+            "boundary_trailing_ms": 0,
+            "clarity_boundary_trimmed": 0,
+            "clarity_leading_ms": 0,
+            "clarity_trailing_ms": 0,
+            "local_clarity_boundary_trimmed": 0,
+            "local_clarity_leading_ms": 0,
+            "local_clarity_trailing_ms": 0,
+            "internal_silence_compressed": 0,
+            "internal_silence_spans": 0,
+            "internal_silence_removed_ms": 0,
+            "original_ms": original_ms,
+            "cleaned_ms": original_ms,
+        }
+        return audio, int(sr), stats
+
+    compacted, silence_stats = compact_internal_silences(
+        audio,
+        sr=int(sr),
+        max_internal_silence_ms=OUTPUT_AUDIO_MAX_INTERNAL_SILENCE_MS,
+    )
+    stats = {
+        "trimmed": int(silence_stats.get("compressed", 0)),
+        "leading_ms": 0,
+        "trailing_ms": 0,
+        "boundary_artifact_trimmed": 0,
+        "boundary_leading_ms": 0,
+        "boundary_trailing_ms": 0,
+        "clarity_boundary_trimmed": 0,
+        "clarity_leading_ms": 0,
+        "clarity_trailing_ms": 0,
+        "local_clarity_boundary_trimmed": 0,
+        "local_clarity_leading_ms": 0,
+        "local_clarity_trailing_ms": 0,
+        "internal_silence_compressed": int(silence_stats.get("compressed", 0)),
+        "internal_silence_spans": int(silence_stats.get("spans", 0)),
+        "internal_silence_removed_ms": int(silence_stats.get("removed_ms", 0)),
+        "original_ms": original_ms,
+        "cleaned_ms": int(round(compacted.shape[0] * 1000.0 / sr)) if sr else 0,
+    }
+    return compacted, int(sr), stats
+
+
 def _find_boundary_sample(
     signal: np.ndarray,
     sr: int,

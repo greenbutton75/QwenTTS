@@ -332,6 +332,45 @@ class ServerGenerationStabilityTests(unittest.TestCase):
         self.assertEqual(trim_mock.call_args.kwargs["max_leading_ms"], 0)
         self.assertTrue(boundary_mock.call_args.kwargs["allow_leading_artifact_trim"])
 
+    def test_clean_output_audio_for_spliced_phrase_skips_boundary_trimming(self) -> None:
+        wav = np.full(16, 0.1, dtype=np.float32)
+        silence_stats = {"compressed": 0, "spans": 0, "removed_ms": 0, "original_ms": 1, "cleaned_ms": 1}
+        with patch.object(server_tts, "trim_audio_edges") as trim_mock, \
+             patch.object(server_tts, "trim_low_energy_boundary_artifacts") as boundary_mock, \
+             patch.object(server_tts, "trim_low_clarity_boundary_blocks") as clarity_mock, \
+             patch.object(server_tts, "refine_local_clarity_boundaries") as local_clarity_mock, \
+             patch.object(server_tts, "compact_internal_silences", return_value=(wav, silence_stats)) as compact_mock:
+            cleaned, out_sr, stats = server_tts.clean_output_audio_for_spliced_phrase(wav, 24000)
+
+        self.assertEqual(out_sr, 24000)
+        self.assertTrue(np.array_equal(cleaned, wav))
+        self.assertEqual(stats["leading_ms"], 0)
+        self.assertEqual(stats["trailing_ms"], 0)
+        self.assertEqual(stats["internal_silence_compressed"], 0)
+        trim_mock.assert_not_called()
+        boundary_mock.assert_not_called()
+        clarity_mock.assert_not_called()
+        local_clarity_mock.assert_not_called()
+        compact_mock.assert_called_once()
+
+    def test_clean_output_audio_for_spliced_phrase_compacts_internal_silence_only(self) -> None:
+        sr = 24000
+        t = np.linspace(0.0, 0.5, int(sr * 0.5), endpoint=False, dtype=np.float32)
+        speech = (0.12 * np.sin(2.0 * np.pi * 220.0 * t)).astype(np.float32)
+        silence = np.zeros(int(sr * 1.2), dtype=np.float32)
+        wav = np.concatenate([speech, silence, speech], axis=0)
+
+        cleaned, out_sr, stats = server_tts.clean_output_audio_for_spliced_phrase(wav, sr)
+
+        self.assertEqual(out_sr, sr)
+        self.assertLess(cleaned.shape[0], wav.shape[0] - int(sr * 0.4))
+        self.assertEqual(stats["leading_ms"], 0)
+        self.assertEqual(stats["trailing_ms"], 0)
+        self.assertEqual(stats["boundary_artifact_trimmed"], 0)
+        self.assertEqual(stats["clarity_boundary_trimmed"], 0)
+        self.assertEqual(stats["local_clarity_boundary_trimmed"], 0)
+        self.assertEqual(stats["internal_silence_compressed"], 1)
+
     def test_clean_output_audio_without_leading_trim_removes_long_low_energy_preroll(self) -> None:
         sr = 24000
         rng = np.random.default_rng(21)

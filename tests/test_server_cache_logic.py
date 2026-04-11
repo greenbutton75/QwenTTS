@@ -73,6 +73,7 @@ def _install_test_stubs() -> None:
     )
     fake_tts.clean_output_audio_preserve_start = fake_tts.clean_output_audio
     fake_tts.clean_output_audio_for_greeting = lambda text, wav, sr: fake_tts.clean_output_audio(wav, sr)
+    fake_tts.clean_output_audio_for_spliced_phrase = fake_tts.clean_output_audio
     fake_tts.clean_reference_audio = (
         lambda wav, sr: (
             wav,
