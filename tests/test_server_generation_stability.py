@@ -104,6 +104,7 @@ class ServerGenerationStabilityTests(unittest.TestCase):
              patch.object(server_tts, "speaker_similarity", return_value=0.81), \
              patch.object(server_tts, "detect_greeting_onset_artifact", return_value={"artifact": 0, "checked": 1}), \
              patch.object(server_tts, "detect_greeting_leading_preroll_artifact", return_value={"artifact": 0, "checked": 1}), \
+             patch.object(server_tts, "detect_greeting_excessive_duration_artifact", return_value={"artifact": 0, "checked": 1}), \
              patch.object(server_tts, "detect_greeting_clipped_ending_artifact", return_value={"artifact": 0, "checked": 1}), \
              patch.object(server_tts, "clean_output_audio", side_effect=AssertionError("should not pretrim")):
             out_wav, sr, similarity, attempts, passed, quality = server_tts.generate_voice_with_similarity_retry(
@@ -128,6 +129,7 @@ class ServerGenerationStabilityTests(unittest.TestCase):
              patch.object(server_tts, "speaker_similarity", side_effect=[0.21, 0.81]), \
              patch.object(server_tts, "detect_greeting_onset_artifact", return_value={"artifact": 0, "checked": 1}), \
              patch.object(server_tts, "detect_greeting_leading_preroll_artifact", return_value={"artifact": 0, "checked": 1}), \
+             patch.object(server_tts, "detect_greeting_excessive_duration_artifact", return_value={"artifact": 0, "checked": 1}), \
              patch.object(server_tts, "detect_greeting_clipped_ending_artifact", return_value={"artifact": 0, "checked": 1}):
             out_wav, sr, similarity, attempts, passed, quality = server_tts.generate_voice_with_similarity_retry(
                 text="Hi, Kevin,",
@@ -153,6 +155,7 @@ class ServerGenerationStabilityTests(unittest.TestCase):
              patch.object(server_tts, "speaker_similarity", side_effect=[0.20, 0.48, 0.35]), \
              patch.object(server_tts, "detect_greeting_onset_artifact", return_value={"artifact": 0, "checked": 1}), \
              patch.object(server_tts, "detect_greeting_leading_preroll_artifact", return_value={"artifact": 0, "checked": 1}), \
+             patch.object(server_tts, "detect_greeting_excessive_duration_artifact", return_value={"artifact": 0, "checked": 1}), \
              patch.object(server_tts, "detect_greeting_clipped_ending_artifact", return_value={"artifact": 0, "checked": 1}):
             out_wav, sr, similarity, attempts, passed, quality = server_tts.generate_voice_with_similarity_retry(
                 text="Hi, Kevin,",
@@ -175,6 +178,7 @@ class ServerGenerationStabilityTests(unittest.TestCase):
         with patch.object(server_tts, "generate_voice", side_effect=[(wav_bad, 24000), (wav_good, 24000)]), \
              patch.object(server_tts, "speaker_similarity", side_effect=[0.82, 0.79]), \
              patch.object(server_tts, "detect_greeting_onset_artifact", return_value={"artifact": 0, "checked": 1}), \
+             patch.object(server_tts, "detect_greeting_excessive_duration_artifact", return_value={"artifact": 0, "checked": 1}), \
              patch.object(server_tts, "detect_greeting_clipped_ending_artifact", return_value={"artifact": 0, "checked": 1}), \
              patch.object(
                  server_tts,
@@ -205,6 +209,7 @@ class ServerGenerationStabilityTests(unittest.TestCase):
              patch.object(server_tts, "speaker_similarity", side_effect=[0.83, 0.80]), \
              patch.object(server_tts, "detect_greeting_onset_artifact", return_value={"artifact": 0, "checked": 1}), \
              patch.object(server_tts, "detect_greeting_leading_preroll_artifact", return_value={"artifact": 0, "checked": 1}), \
+             patch.object(server_tts, "detect_greeting_excessive_duration_artifact", return_value={"artifact": 0, "checked": 1}), \
              patch.object(
                  server_tts,
                  "detect_greeting_clipped_ending_artifact",
@@ -224,6 +229,35 @@ class ServerGenerationStabilityTests(unittest.TestCase):
         self.assertEqual(attempts, 2)
         self.assertTrue(passed)
         self.assertEqual(quality["ending_artifact"], 0)
+        self.assertEqual(quality["greeting_passed"], 1)
+
+    def test_similarity_retry_rejects_excessively_long_greeting(self) -> None:
+        wav_bad = np.full(8, 0.1, dtype=np.float32)
+        wav_good = np.full(8, 0.2, dtype=np.float32)
+        with patch.object(server_tts, "generate_voice", side_effect=[(wav_bad, 24000), (wav_good, 24000)]), \
+             patch.object(server_tts, "speaker_similarity", side_effect=[0.82, 0.80]), \
+             patch.object(server_tts, "detect_greeting_onset_artifact", return_value={"artifact": 0, "checked": 1}), \
+             patch.object(server_tts, "detect_greeting_leading_preroll_artifact", return_value={"artifact": 0, "checked": 1}), \
+             patch.object(
+                 server_tts,
+                 "detect_greeting_excessive_duration_artifact",
+                 side_effect=[{"artifact": 1, "checked": 1}, {"artifact": 0, "checked": 1}],
+             ), \
+             patch.object(server_tts, "detect_greeting_clipped_ending_artifact", return_value={"artifact": 0, "checked": 1}):
+            out_wav, sr, similarity, attempts, passed, quality = server_tts.generate_voice_with_similarity_retry(
+                text="Hi, Dennis.",
+                voice_prompt=["prompt"],
+                reference_embedding=np.array([0.1, 0.2], dtype=np.float32),
+                min_similarity=0.55,
+                max_attempts=3,
+            )
+
+        self.assertTrue(np.array_equal(out_wav, wav_good))
+        self.assertEqual(sr, 24000)
+        self.assertAlmostEqual(similarity, 0.80, places=6)
+        self.assertEqual(attempts, 2)
+        self.assertTrue(passed)
+        self.assertEqual(quality["duration_artifact"], 0)
         self.assertEqual(quality["greeting_passed"], 1)
 
     def test_trim_audio_edges_removes_leading_and_trailing_silence(self) -> None:
@@ -550,6 +584,27 @@ class ServerGenerationStabilityTests(unittest.TestCase):
         wav[-fade.size :] *= fade
 
         stats = server_tts.detect_greeting_clipped_ending_artifact("Hi, Dennis.", wav, sr)
+
+        self.assertEqual(stats["checked"], 1)
+        self.assertEqual(stats["artifact"], 0)
+
+    def test_detect_greeting_excessive_duration_artifact_flags_too_long_hi_name(self) -> None:
+        sr = 24000
+        t = np.linspace(0.0, 2.8, int(sr * 2.8), endpoint=False, dtype=np.float32)
+        wav = (0.10 * np.sin(2.0 * np.pi * 210.0 * t)).astype(np.float32)
+
+        stats = server_tts.detect_greeting_excessive_duration_artifact("Hi, Dennis.", wav, sr)
+
+        self.assertEqual(stats["checked"], 1)
+        self.assertEqual(stats["artifact"], 1)
+        self.assertGreaterEqual(stats["duration_ms"], stats["expected_max_ms"])
+
+    def test_detect_greeting_excessive_duration_artifact_allows_normal_hi_name(self) -> None:
+        sr = 24000
+        t = np.linspace(0.0, 1.4, int(sr * 1.4), endpoint=False, dtype=np.float32)
+        wav = (0.10 * np.sin(2.0 * np.pi * 210.0 * t)).astype(np.float32)
+
+        stats = server_tts.detect_greeting_excessive_duration_artifact("Hi, Dennis.", wav, sr)
 
         self.assertEqual(stats["checked"], 1)
         self.assertEqual(stats["artifact"], 0)

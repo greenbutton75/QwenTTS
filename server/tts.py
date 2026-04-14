@@ -215,6 +215,9 @@ def generate_voice_with_similarity_retry(
         "onset_artifact": 0,
         "onset_checked": 0,
         "onset_passed": 1,
+        "duration_artifact": 0,
+        "duration_checked": 0,
+        "duration_passed": 1,
         "ending_artifact": 0,
         "ending_checked": 0,
         "ending_passed": 1,
@@ -235,15 +238,20 @@ def generate_voice_with_similarity_retry(
         similarity = speaker_similarity(wav, sr, reference_embedding)
         onset_stats = detect_greeting_onset_artifact(text, wav, sr)
         preroll_stats = detect_greeting_leading_preroll_artifact(text, wav, sr)
+        duration_stats = detect_greeting_excessive_duration_artifact(text, wav, sr)
         ending_stats = detect_greeting_clipped_ending_artifact(text, wav, sr)
         onset_passed = int(not onset_stats.get("artifact", 0))
         preroll_passed = int(not preroll_stats.get("artifact", 0))
+        duration_passed = int(not duration_stats.get("artifact", 0))
         ending_passed = int(not ending_stats.get("artifact", 0))
         quality = {
             "similarity_passed": int(similarity >= float(min_similarity)),
             "onset_artifact": int(onset_stats.get("artifact", 0)),
             "onset_checked": int(onset_stats.get("checked", 0)),
             "onset_passed": onset_passed,
+            "duration_artifact": int(duration_stats.get("artifact", 0)),
+            "duration_checked": int(duration_stats.get("checked", 0)),
+            "duration_passed": duration_passed,
             "ending_artifact": int(ending_stats.get("artifact", 0)),
             "ending_checked": int(ending_stats.get("checked", 0)),
             "ending_passed": ending_passed,
@@ -251,8 +259,9 @@ def generate_voice_with_similarity_retry(
             "preroll_checked": int(preroll_stats.get("checked", 0)),
             "preroll_passed": preroll_passed,
             "start_passed": int(onset_passed and preroll_passed),
-            "greeting_passed": int(onset_passed and preroll_passed and ending_passed),
+            "greeting_passed": int(onset_passed and preroll_passed and duration_passed and ending_passed),
             **onset_stats,
+            **{f"duration_{key}": value for key, value in duration_stats.items() if key not in {"artifact", "checked"}},
             **{f"ending_{key}": value for key, value in ending_stats.items() if key not in {"artifact", "checked"}},
             **{f"preroll_{key}": value for key, value in preroll_stats.items() if key not in {"artifact", "checked"}},
         }
@@ -866,6 +875,38 @@ def detect_greeting_clipped_ending_artifact(text: str, wav: np.ndarray, sr: int)
         "tail_to_global_ratio": tail_to_global_ratio,
         "tail_speech_ratio": tail_speech_ratio,
         "tail_run_ms": tail_run_ms,
+    }
+
+
+def detect_greeting_excessive_duration_artifact(text: str, wav: np.ndarray, sr: int) -> Dict[str, float]:
+    audio = _normalize_audio(wav)
+    default = {
+        "artifact": 0,
+        "checked": 0,
+        "duration_ms": 0,
+        "expected_max_ms": 0,
+        "duration_to_limit_ratio": 0.0,
+    }
+    if not GREETING_ONSET_ARTIFACT_CHECK:
+        return default
+
+    match = _SHORT_GREETING_RE.match(text or "")
+    if not match:
+        return default
+
+    greeting_word = (match.group(1) or "").strip().lower()
+    name_letters = re.sub(r"[^a-zA-Z]", "", match.group(2) or "")
+    letter_count = max(1, len(name_letters)) + (2 if greeting_word == "hello" else 1)
+    duration_ms = int(round(audio.shape[0] * 1000.0 / max(int(sr), 1)))
+    expected_max_ms = int(min(3200, max(1800, 1000 + letter_count * 180)))
+    ratio = duration_ms / max(expected_max_ms, 1)
+    artifact = int(duration_ms >= expected_max_ms)
+    return {
+        "artifact": artifact,
+        "checked": 1,
+        "duration_ms": duration_ms,
+        "expected_max_ms": expected_max_ms,
+        "duration_to_limit_ratio": ratio,
     }
 
 
