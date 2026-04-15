@@ -306,18 +306,13 @@ class ServerGenerationStabilityTests(unittest.TestCase):
         self.assertEqual(quality["ending_artifact"], 0)
         self.assertEqual(quality["greeting_passed"], 1)
 
-    def test_similarity_retry_rejects_excessively_long_greeting(self) -> None:
+    def test_similarity_retry_allows_excessively_long_greeting_but_flags_it(self) -> None:
         wav_bad = np.full(8, 0.1, dtype=np.float32)
-        wav_good = np.full(8, 0.2, dtype=np.float32)
-        with patch.object(server_tts, "generate_voice", side_effect=[(wav_bad, 24000), (wav_good, 24000)]), \
-             patch.object(server_tts, "speaker_similarity", side_effect=[0.82, 0.80]), \
+        with patch.object(server_tts, "generate_voice", return_value=(wav_bad, 24000)), \
+             patch.object(server_tts, "speaker_similarity", return_value=0.82), \
              patch.object(server_tts, "detect_greeting_onset_artifact", return_value={"artifact": 0, "checked": 1}), \
              patch.object(server_tts, "detect_greeting_leading_preroll_artifact", return_value={"artifact": 0, "checked": 1}), \
-             patch.object(
-                 server_tts,
-                 "detect_greeting_excessive_duration_artifact",
-                 side_effect=[{"artifact": 1, "checked": 1}, {"artifact": 0, "checked": 1}],
-             ), \
+             patch.object(server_tts, "detect_greeting_excessive_duration_artifact", return_value={"artifact": 1, "checked": 1}), \
              patch.object(server_tts, "detect_greeting_clipped_ending_artifact", return_value={"artifact": 0, "checked": 1}):
             out_wav, sr, similarity, attempts, passed, quality = server_tts.generate_voice_with_similarity_retry(
                 text="Hi, Dennis.",
@@ -327,12 +322,12 @@ class ServerGenerationStabilityTests(unittest.TestCase):
                 max_attempts=3,
             )
 
-        self.assertTrue(np.array_equal(out_wav, wav_good))
+        self.assertTrue(np.array_equal(out_wav, wav_bad))
         self.assertEqual(sr, 24000)
-        self.assertAlmostEqual(similarity, 0.80, places=6)
-        self.assertEqual(attempts, 2)
+        self.assertAlmostEqual(similarity, 0.82, places=6)
+        self.assertEqual(attempts, 1)
         self.assertTrue(passed)
-        self.assertEqual(quality["duration_artifact"], 0)
+        self.assertEqual(quality["duration_artifact"], 1)
         self.assertEqual(quality["greeting_passed"], 1)
 
     def test_trim_audio_edges_removes_leading_and_trailing_silence(self) -> None:
