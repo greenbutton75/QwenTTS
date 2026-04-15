@@ -2,6 +2,7 @@ import os
 import time
 import traceback
 from typing import Any, Dict
+import re
 
 from .cache_utils import prompt_fingerprint
 from .config import LOG_BACKUPS, LOG_DIR, LOG_MAX_BYTES
@@ -38,8 +39,31 @@ from .tts import (
     is_fatal_cuda_error,
     load_audio,
     write_wav_temp,
+    greeting_splice_generate_configs,
 )
 from timing_utils import setup_timing_logger, timed_operation
+
+
+GREETING_SPLIT_RE = re.compile(
+    r"^\s*(hi|hello)(?:\s+[!,.]?\s*|[!,.]\s*)([a-zA-Z][a-zA-Z'\-]*)\s*([!,.]?)\s*",
+    re.IGNORECASE,
+)
+
+
+def _split_greeting_body(text: str):
+    if not isinstance(text, str):
+        return None
+    raw = text.strip()
+    if not raw:
+        return None
+    match = GREETING_SPLIT_RE.match(raw)
+    if not match:
+        return None
+    greeting = raw[: match.end()].strip()
+    body = raw[match.end() :].strip()
+    if not greeting or not body:
+        return None
+    return greeting, body
 
 
 def _voice_paths(support_id: str, voice_id: str) -> Dict[str, str]:
@@ -227,27 +251,34 @@ class Worker:
                 "greeting_passed": 1,
             }
             with timed_operation(self.timing_logger, "api.worker.phrase.generate", support_id=support_id, voice_id=voice_id, phrase_id=phrase_id) as phrase_span:
-                if isinstance(text, str) and text.strip().lower().startswith(("hi ", "hi,", "hello ", "hello,")):
+                split = _split_greeting_body(text)
+                if split is not None:
+                    greeting_text, _ = split
+                    probe_initial_generate_config, probe_retry_generate_config = greeting_splice_generate_configs()
                     (
-                        wav,
-                        sr,
+                        _probe_wav,
+                        _probe_sr,
                         greeting_similarity,
                         greeting_attempts,
                         greeting_similarity_passed,
                         greeting_quality,
                     ) = generate_voice_with_similarity_retry(
-                        text=text,
+                        text=greeting_text,
                         voice_prompt=voice_prompt,
                         reference_embedding=prompt_data["ref_spk_embedding"],
                         min_similarity=GREETING_SPEAKER_SIMILARITY_THRESHOLD,
                         max_attempts=GREETING_FULL_PHRASE_MAX_ATTEMPTS,
+                        initial_generate_config=probe_initial_generate_config,
+                        retry_generate_config=probe_retry_generate_config,
                         timing_logger=self.timing_logger,
                         attempt_operation="api.worker.phrase.greeting_attempt",
                         timing_fields={
                             "support_id": support_id,
                             "voice_id": voice_id,
                             "phrase_id": phrase_id,
+                            "probe_mode": 1,
                             "text_chars": len(text or ""),
+                            "greeting_chars": len(greeting_text or ""),
                         },
                     )
                     phrase_span.set(
@@ -271,7 +302,8 @@ class Worker:
                         greeting_quality.get("start_passed", 1),
                     ):
                         raise RuntimeError("phrase greeting quality artifact detected in all attempts")
-                    wav, sr, output_trim = clean_output_audio_for_greeting(text, wav, sr)
+                    wav, sr = generate_voice(text, voice_prompt)
+                    wav, sr, output_trim = clean_output_audio(wav, sr)
                 else:
                     wav, sr = generate_voice(text, voice_prompt)
                     wav, sr, output_trim = clean_output_audio(wav, sr)

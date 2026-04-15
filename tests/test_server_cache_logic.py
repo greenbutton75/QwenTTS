@@ -65,9 +65,33 @@ def _install_test_stubs() -> None:
     fake_tts.create_voice_prompt = lambda ref_audio, ref_text, x_vector_only: None
     fake_tts.generate_voice = lambda text, voice_prompt: (np.zeros(8, dtype=np.float32), 24000)
     fake_tts.generate_voice_with_similarity_retry = (
-        lambda text, voice_prompt, reference_embedding, min_similarity, max_attempts:
-        (np.zeros(8, dtype=np.float32), 24000, 0.99, 1, True)
+        lambda text, voice_prompt, reference_embedding, min_similarity, max_attempts, **kwargs:
+        (
+            np.zeros(8, dtype=np.float32),
+            24000,
+            0.99,
+            1,
+            True,
+            {
+                "similarity_passed": 1,
+                "onset_artifact": 0,
+                "onset_checked": 1,
+                "onset_passed": 1,
+                "duration_artifact": 0,
+                "duration_checked": 1,
+                "duration_passed": 1,
+                "ending_artifact": 0,
+                "ending_checked": 1,
+                "ending_passed": 1,
+                "preroll_artifact": 0,
+                "preroll_checked": 1,
+                "preroll_passed": 1,
+                "start_passed": 1,
+                "greeting_passed": 1,
+            },
+        )
     )
+    fake_tts.greeting_splice_generate_configs = lambda: ({"max_new_tokens": 256}, {"max_new_tokens": 256})
     fake_tts.is_fatal_cuda_error = lambda exc_or_text: False
     fake_tts.clean_output_audio = (
         lambda wav, sr: (
@@ -283,7 +307,7 @@ class ServerCacheLogicTests(unittest.TestCase):
             "support_id": "support-1",
             "voice_id": "voice-1",
             "phrase_id": "phrase-1",
-            "text": "Hi Dennis.",
+            "text": "Hi Dennis. I would like to learn more about your business.",
         }
         prompt_data = {
             "ref_code": np.array([[1, 2, 3]], dtype=np.int16),
@@ -321,6 +345,59 @@ class ServerCacheLogicTests(unittest.TestCase):
             worker._handle_phrase(payload)
 
         self.assertEqual(retry_mock.call_args.kwargs["max_attempts"], 4)
+        self.assertEqual(retry_mock.call_args.kwargs["text"], "Hi Dennis.")
+
+    def test_full_phrase_split_uses_short_greeting_probe_then_single_full_render(self) -> None:
+        worker = server_worker.Worker(db=MagicMock(), logger=MagicMock())
+        payload = {
+            "support_id": "support-1",
+            "voice_id": "voice-1",
+            "phrase_id": "phrase-2",
+            "text": "Hi Dennis. I would like to learn more about your business.",
+        }
+        prompt_data = {
+            "ref_code": np.array([[1, 2, 3]], dtype=np.int16),
+            "ref_spk_embedding": np.array([0.1, 0.2], dtype=np.float32),
+            "x_vector_only_mode": False,
+            "icl_mode": True,
+            "ref_text": "reference text",
+        }
+        quality = {
+            "similarity_passed": 1,
+            "onset_artifact": 0,
+            "onset_checked": 1,
+            "onset_passed": 1,
+            "duration_artifact": 1,
+            "duration_checked": 1,
+            "duration_passed": 0,
+            "ending_artifact": 0,
+            "ending_checked": 1,
+            "ending_passed": 1,
+            "preroll_artifact": 0,
+            "preroll_checked": 1,
+            "preroll_passed": 1,
+            "start_passed": 1,
+            "greeting_passed": 1,
+        }
+        with patch.object(server_worker, "download_torch", return_value=prompt_data), \
+             patch.object(server_worker, "generate_voice_with_similarity_retry", return_value=(np.zeros(8, dtype=np.float32), 24000, 0.91, 2, True, quality)) as retry_mock, \
+             patch.object(server_worker, "generate_voice", return_value=(np.zeros(8, dtype=np.float32), 24000)) as full_generate_mock, \
+             patch.object(server_worker, "clean_output_audio", return_value=(np.zeros(8, dtype=np.float32), 24000, {"trimmed": 0, "leading_ms": 0, "trailing_ms": 0, "original_ms": 0, "cleaned_ms": 0})) as clean_mock, \
+             patch.object(server_worker, "write_wav_temp", return_value="tmp.wav"), \
+             patch.object(server_worker, "upload_file"), \
+             patch.object(server_worker, "create_presigned_url", return_value="https://example.invalid/audio.wav"), \
+             patch.object(server_worker, "write_json"), \
+             patch.object(server_worker.os, "remove"), \
+             patch.object(server_worker, "GREETING_FULL_PHRASE_MAX_ATTEMPTS", 2):
+            worker._handle_phrase(payload)
+
+        self.assertEqual(retry_mock.call_count, 1)
+        self.assertEqual(retry_mock.call_args.kwargs["text"], "Hi Dennis.")
+        self.assertEqual(retry_mock.call_args.kwargs["max_attempts"], 2)
+        self.assertEqual(retry_mock.call_args.kwargs["timing_fields"]["probe_mode"], 1)
+        self.assertEqual(full_generate_mock.call_count, 1)
+        self.assertEqual(full_generate_mock.call_args.args[0], payload["text"])
+        clean_mock.assert_called_once()
 
 
 if __name__ == "__main__":
