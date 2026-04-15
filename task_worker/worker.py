@@ -279,6 +279,81 @@ def _submit_and_wait_splice_phrase(
         return False, str(result.get("error", "phrase failed"))
 
 
+def _process_split_phrase_item(item: Dict[str, Any], state: HealthState) -> None:
+    try:
+        greeting, body = item["split"]
+        ok, err = _submit_and_wait_splice_phrase(
+            task_id=item["task_id"],
+            support_id=item["support_id"],
+            voice_id=item["voice_id"],
+            phrase_id=item["phrase_id"],
+            greeting=greeting,
+            body=body,
+            state=state,
+        )
+        if ok:
+            state.inc_phrase_splice_path()
+            return
+        if _is_retryable_qwen_api_error(err):
+            state.inc_splice_failure()
+            raise RuntimeError(f"retryable splice failure: {err}")
+        state.inc_splice_failure()
+        state.inc_phrase_fallback_full()
+        full_ok, full_err = _submit_and_wait_full_phrase(
+            task_id=item["task_id"],
+            support_id=item["support_id"],
+            voice_id=item["voice_id"],
+            phrase_id=item["phrase_id"],
+            text=item["text"],
+            state=state,
+        )
+        if not full_ok:
+            if _is_retryable_qwen_api_error(full_err):
+                raise RuntimeError(f"retryable full fallback failure: {full_err}")
+            failed_task(
+                item["task_id"],
+                error=f"splice failed: {err}; full fallback failed: {full_err}",
+            )
+            state.inc_phrase_failed()
+    except Exception as exc:
+        state.inc_splice_failure()
+        if _is_retryable_qwen_api_error(exc):
+            logger.warning(
+                "splice path hit retryable Qwen API error for task_id=%s phrase_id=%s: %s",
+                item["task_id"],
+                item["phrase_id"],
+                exc,
+            )
+            raise
+        logger.warning(
+            "splice path failed for task_id=%s phrase_id=%s, fallback to full phrase: %s",
+            item["task_id"],
+            item["phrase_id"],
+            exc,
+        )
+        try:
+            state.inc_phrase_fallback_full()
+            ok, full_err = _submit_and_wait_full_phrase(
+                task_id=item["task_id"],
+                support_id=item["support_id"],
+                voice_id=item["voice_id"],
+                phrase_id=item["phrase_id"],
+                text=item["text"],
+                state=state,
+            )
+            if not ok:
+                if _is_retryable_qwen_api_error(full_err):
+                    raise RuntimeError(full_err)
+                failed_task(item["task_id"], error=f"splice exception and full fallback failed: {full_err}")
+                state.inc_phrase_failed()
+        except Exception as full_exc:
+            if _is_retryable_qwen_api_error(full_exc):
+                raise
+            failed_task(item["task_id"], error=str(full_exc))
+            state.inc_phrase_failed()
+            state.set_error(str(full_exc))
+
+
 def process_create_profiles(state: HealthState) -> None:
     with timed_operation(timing_logger, "task_worker.process_profiles.batch") as span:
         tasks = list_tasks(task_type="QWEN_TTS_CREATE_PROFILE", statuses=["NEW"], ignore_user_filter=True)
@@ -410,7 +485,7 @@ def process_phrases_batch(state: HealthState) -> None:
                 grouping_keys=len(groups),
             )
 
-        grouped_task_ids = set()
+        processed_task_ids = set()
         splice_group_count = 0
         for group_items in groups.values():
             if len(group_items) < 2:
@@ -418,82 +493,15 @@ def process_phrases_batch(state: HealthState) -> None:
             splice_group_count += 1
             state.inc_phrase_grouped(len(group_items))
             for item in group_items:
-                grouped_task_ids.add(item["task_id"])
-                try:
-                    greeting, body = item["split"]
-                    ok, err = _submit_and_wait_splice_phrase(
-                        task_id=item["task_id"],
-                        support_id=item["support_id"],
-                        voice_id=item["voice_id"],
-                        phrase_id=item["phrase_id"],
-                        greeting=greeting,
-                        body=body,
-                        state=state,
-                    )
-                    if ok:
-                        state.inc_phrase_splice_path()
-                    else:
-                        if _is_retryable_qwen_api_error(err):
-                            state.inc_splice_failure()
-                            raise RuntimeError(f"retryable splice failure: {err}")
-                        state.inc_splice_failure()
-                        state.inc_phrase_fallback_full()
-                        full_ok, full_err = _submit_and_wait_full_phrase(
-                            task_id=item["task_id"],
-                            support_id=item["support_id"],
-                            voice_id=item["voice_id"],
-                            phrase_id=item["phrase_id"],
-                            text=item["text"],
-                            state=state,
-                        )
-                        if not full_ok:
-                            if _is_retryable_qwen_api_error(full_err):
-                                raise RuntimeError(f"retryable full fallback failure: {full_err}")
-                            failed_task(
-                                item["task_id"],
-                                error=f"splice failed: {err}; full fallback failed: {full_err}",
-                            )
-                            state.inc_phrase_failed()
-                except Exception as exc:
-                    state.inc_splice_failure()
-                    if _is_retryable_qwen_api_error(exc):
-                        logger.warning(
-                            "splice path hit retryable Qwen API error for task_id=%s phrase_id=%s: %s",
-                            item["task_id"],
-                            item["phrase_id"],
-                            exc,
-                        )
-                        raise
-                    logger.warning(
-                        "splice path failed for task_id=%s phrase_id=%s, fallback to full phrase: %s",
-                        item["task_id"],
-                        item["phrase_id"],
-                        exc,
-                    )
-                    try:
-                        state.inc_phrase_fallback_full()
-                        ok, full_err = _submit_and_wait_full_phrase(
-                            task_id=item["task_id"],
-                            support_id=item["support_id"],
-                            voice_id=item["voice_id"],
-                            phrase_id=item["phrase_id"],
-                            text=item["text"],
-                            state=state,
-                        )
-                        if not ok:
-                            if _is_retryable_qwen_api_error(full_err):
-                                raise RuntimeError(full_err)
-                            failed_task(item["task_id"], error=f"splice exception and full fallback failed: {full_err}")
-                            state.inc_phrase_failed()
-                    except Exception as full_exc:
-                        if _is_retryable_qwen_api_error(full_exc):
-                            raise
-                        failed_task(item["task_id"], error=str(full_exc))
-                        state.inc_phrase_failed()
-                        state.set_error(str(full_exc))
+                processed_task_ids.add(item["task_id"])
+                _process_split_phrase_item(item, state)
 
         for item in parsed:
-            if item["task_id"] in grouped_task_ids:
+            if item["task_id"] in processed_task_ids:
+                continue
+            if item.get("split"):
+                processed_task_ids.add(item["task_id"])
+                _process_split_phrase_item(item, state)
                 continue
             try:
                 state.inc_phrase_fallback_full()
@@ -517,14 +525,14 @@ def process_phrases_batch(state: HealthState) -> None:
                 state.inc_phrase_failed()
                 state.set_error(str(exc))
 
-        span.set(parsed_tasks=len(parsed), splice_groups=splice_group_count, grouped_tasks=len(grouped_task_ids))
+        span.set(parsed_tasks=len(parsed), splice_groups=splice_group_count, grouped_tasks=len(processed_task_ids))
         if ENABLE_PHRASE_SPLICE_GROUPING:
             logger.info(
                 "phrase batch processed: total=%s parsed=%s splice_groups=%s grouped_tasks=%s",
                 len(tasks),
                 len(parsed),
                 splice_group_count,
-                len(grouped_task_ids),
+                len(processed_task_ids),
             )
 
 

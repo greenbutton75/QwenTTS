@@ -174,6 +174,36 @@ class TaskWorkerStartupTests(unittest.TestCase):
 
         failed_mock.assert_not_called()
 
+    def test_process_phrases_batch_uses_splice_for_single_split_candidate(self) -> None:
+        rec = {
+            "id": "1",
+            "taskParameters": {
+                "support_id": "72290",
+                "voice_id": "voice-1",
+                "phrase_id": "phrase-1",
+                "text": "Hi Kevin, this is Eugene from RiXtrema",
+            },
+        }
+        state = task_worker_module.HealthState()
+        state.inc_phrase_grouped = MagicMock()
+        state.inc_phrase_splice_path = MagicMock()
+        state.inc_phrase_fallback_full = MagicMock()
+        state.mark_phrase_poll = MagicMock()
+
+        with patch.object(task_worker_module, "list_tasks", return_value=[rec]), \
+             patch.object(task_worker_module, "task_id_from_record", side_effect=lambda item: str(item["id"])), \
+             patch.object(task_worker_module, "task_params_from_record", side_effect=lambda item: item["taskParameters"]), \
+             patch.object(task_worker_module, "_profile_ready_in_s3", return_value=True), \
+             patch.object(task_worker_module, "_submit_and_wait_splice_phrase", return_value=(True, "")) as splice_mock, \
+             patch.object(task_worker_module, "_submit_and_wait_full_phrase") as full_mock:
+            task_worker_module.process_phrases_batch(state)
+
+        splice_mock.assert_called_once()
+        full_mock.assert_not_called()
+        state.inc_phrase_splice_path.assert_called_once()
+        state.inc_phrase_fallback_full.assert_not_called()
+        state.inc_phrase_grouped.assert_not_called()
+
 
 if __name__ == "__main__":
     unittest.main()
