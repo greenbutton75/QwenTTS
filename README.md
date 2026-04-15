@@ -517,8 +517,10 @@ See `docs/watchdog.md` for configuration, recovery logic, and required env overr
 - Добавлен быстрый вариант B для ограничения цены неудачного splice:
   - greeting retry budget теперь разделён для splice и full phrase;
   - `GREETING_SPLICE_MAX_ATTEMPTS` default `3`;
-  - `GREETING_FULL_PHRASE_MAX_ATTEMPTS` default `5`;
-  - это удешевляет неудачный splice, не трогая более редкий full fallback слишком жёстко.
+  - `GREETING_FULL_PHRASE_MAX_ATTEMPTS` default `2`;
+  - `GREETING_SPLICE_MAX_NEW_TOKENS` default `256` ограничивает именно splice-greeting;
+  - `duration_artifact` больше не является hard-fail сам по себе, он остаётся в диагностике;
+  - full fallback теперь сначала делает дешёвый `greeting probe`, и только потом один полный рендер длинной фразы.
 - Расширено timing-логирование для расследования idle / slow batch windows:
   - в `task_worker_timing.log` теперь логируются не только вызовы к локальному API, но и обращения к production task API (`Tasks/List`, `ChangeTaskProgress`, `CompleteTask`);
   - добавлен отдельный span подготовки batch: `task_worker.process_phrases.prepare`;
@@ -543,7 +545,8 @@ QWEN_TTS_PROFILE_REQUEST_TIMEOUT_SECONDS=180
 QWEN_TTS_PHRASE_REQUEST_TIMEOUT_SECONDS=150
 QWEN_TTS_SPLICE_REQUEST_TIMEOUT_SECONDS=150
 GREETING_SPLICE_MAX_ATTEMPTS=3
-GREETING_FULL_PHRASE_MAX_ATTEMPTS=5
+GREETING_FULL_PHRASE_MAX_ATTEMPTS=2
+GREETING_SPLICE_MAX_NEW_TOKENS=256
 ```
 
 Операционно это значит:
@@ -559,7 +562,10 @@ GREETING_FULL_PHRASE_MAX_ATTEMPTS=5
 - если в логах при этом доминируют `Read timed out`, проблема в зависающем API/splice path, а не в слишком маленьком количестве greeting retries.
 - если текущий `xvector_only=true` profile и его `body` cache уже звучат хорошо, не нужно заново refresh-ить profile перед проверкой новых серверных фиксов: сначала выкатывайте код и проверяйте тот же `voice_id`.
 - если `splice` уже основной путь, а latency всё ещё высокая, смотрите в `server_timing.log` поля `greeting_attempts` и `api.splice_synthesize.total`;
-- после разделения retry budgets у splice не должно быть `greeting_attempts > GREETING_SPLICE_MAX_ATTEMPTS`; если и с этим голос остаётся медленным, проблема уже в самом voice/profile, а не в cache или merge.
+- после разделения retry budgets у splice не должно быть `greeting_attempts > GREETING_SPLICE_MAX_ATTEMPTS`;
+- если и после этого конкретный голос остаётся тяжёлым, обычно проблема уже в его коротком `greeting`, а не в `body` cache или merge;
+- грубый per-voice breaker "`весь голос сразу в full`" пока сознательно не включён: он может убрать удачные splice и ухудшить общий throughput;
+- если full fallback всё ещё дорогой, проверяйте `api.worker.phrase.greeting_attempt`: теперь там видно короткий `greeting probe` отдельно от полного рендера.
 
 ## Возможности
 

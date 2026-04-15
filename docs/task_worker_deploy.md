@@ -168,8 +168,15 @@ The server-side output cleanup was extended to handle real production failures:
   - best practice is to keep names in greeting only and leave the reusable body identical
 - a fast mitigation was added for costly failed splice attempts:
   - `GREETING_SPLICE_MAX_ATTEMPTS=3`
-  - `GREETING_FULL_PHRASE_MAX_ATTEMPTS=5`
-  - splice now fails over sooner, while full fallback keeps a slightly wider retry budget
+  - `GREETING_FULL_PHRASE_MAX_ATTEMPTS=2`
+  - `GREETING_SPLICE_MAX_NEW_TOKENS=256`
+  - splice now fails over sooner, and failed splice greeting generations are cheaper
+- greeting duration is still logged, but no longer rejected by itself:
+  - `duration_artifact` remains diagnostic metadata only
+  - hard-fail remains for bad start / preroll / clipped ending
+- full fallback was redesigned to avoid multiple full-length renders just to validate greeting:
+  - server now runs a short `greeting probe` first
+  - only if probe passes does it perform one normal full render of the long phrase
 - timing coverage was extended for investigation of long non-GPU pauses:
   - `task_worker_timing.log` now records production task API calls such as `list_tasks`, `update_progress`, and task completion/failure updates
   - `task_worker.process_phrases.prepare` measures the batch-preparation window before the first splice/full submission
@@ -192,7 +199,8 @@ QWEN_TTS_PROFILE_REQUEST_TIMEOUT_SECONDS=180
 QWEN_TTS_PHRASE_REQUEST_TIMEOUT_SECONDS=150
 QWEN_TTS_SPLICE_REQUEST_TIMEOUT_SECONDS=150
 GREETING_SPLICE_MAX_ATTEMPTS=3
-GREETING_FULL_PHRASE_MAX_ATTEMPTS=5
+GREETING_FULL_PHRASE_MAX_ATTEMPTS=2
+GREETING_SPLICE_MAX_NEW_TOKENS=256
 ```
 
 Operational note:
@@ -208,6 +216,12 @@ Operational note:
 - if a current `xvector_only=true` profile and its `body` cache already sound good, keep that profile and validate only the new server code before reprocessing the voice again
 - if `body_cache_hit` is already high but phrase latency is still large, inspect `greeting_attempts` in `server_timing.log`
 - after the retry-budget split, `splice` should never exceed `GREETING_SPLICE_MAX_ATTEMPTS`; long latency above that point means the voice/profile itself is unstable on short greetings
+- if `splice` still fails for one voice, do not blindly disable splice for the whole voice in production: successful splice is often still cheaper than forcing all remaining phrases through full fallback
+- for current diagnostics, compare:
+  - `api.splice_synthesize.greeting_attempt`
+  - `api.splice_synthesize.total`
+  - `api.worker.phrase.greeting_attempt`
+  - `api.worker.phrase.generate`
 
 ## Health counter notes
 

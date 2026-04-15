@@ -332,8 +332,16 @@ Production audio postprocess was strengthened after real cases with multi-second
   - best practice is to keep personalization in `greeting` and keep the reusable `body` identical
 - a fast protection path was added for expensive failed splice attempts:
   - `GREETING_SPLICE_MAX_ATTEMPTS` defaults to `3`
-  - `GREETING_FULL_PHRASE_MAX_ATTEMPTS` defaults to `5`
-  - this limits the price of bad splice greeting retries without shrinking the retry budget of the rarer full fallback too aggressively
+  - `GREETING_FULL_PHRASE_MAX_ATTEMPTS` defaults to `2`
+  - `GREETING_SPLICE_MAX_NEW_TOKENS` defaults to `256`
+  - this limits the price of bad splice greeting retries and reduces the worst-case cost of failed splice paths
+- greeting duration remains recorded, but is no longer a hard rejection by itself:
+  - `duration_artifact` is now diagnostic only
+  - hard rejection remains for bad start / preroll / clipped ending
+- full fallback was changed to a two-stage path:
+  - first a short `greeting probe`
+  - then one full-length render only after the probe passes
+  - this avoids repeated long full renders whose only purpose was greeting validation
 - timing instrumentation was extended for slow-batch расследование:
   - `task_worker_timing.log` now includes production task API calls such as `Tasks/List`, progress updates, and task completion calls
   - `task_worker.process_phrases.prepare` shows how much time is spent before the first splice/full submission
@@ -352,7 +360,8 @@ QWEN_TTS_PROFILE_REQUEST_TIMEOUT_SECONDS=180
 QWEN_TTS_PHRASE_REQUEST_TIMEOUT_SECONDS=150
 QWEN_TTS_SPLICE_REQUEST_TIMEOUT_SECONDS=150
 GREETING_SPLICE_MAX_ATTEMPTS=3
-GREETING_FULL_PHRASE_MAX_ATTEMPTS=5
+GREETING_FULL_PHRASE_MAX_ATTEMPTS=2
+GREETING_SPLICE_MAX_NEW_TOKENS=256
 ```
 
 Operational note:
@@ -368,6 +377,7 @@ Operational note:
 - if the dominant splice errors are `Read timed out`, increasing greeting retries will not help; the fix is to address API hangs / timeouts first
 - after the retry-budget split, a healthy splice path should never show `greeting_attempts > GREETING_SPLICE_MAX_ATTEMPTS`
 - if latency stays high while `body_cache_hit` is already high, the next place to inspect is `greeting_attempts` inside `api.splice_synthesize.total`
+- do not enable a blunt "`problematic voice -> always full`" policy unless you have measured it locally first: for some voices successful splice is still materially cheaper than full fallback
 
 ## 8) Windows Watchdog
 

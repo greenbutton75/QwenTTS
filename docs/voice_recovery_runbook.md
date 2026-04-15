@@ -366,10 +366,13 @@ For the tested voice:
 The server now uses separate greeting retry budgets:
 
 - `GREETING_SPLICE_MAX_ATTEMPTS=3`
-- `GREETING_FULL_PHRASE_MAX_ATTEMPTS=5`
+- `GREETING_FULL_PHRASE_MAX_ATTEMPTS=2`
+- `GREETING_SPLICE_MAX_NEW_TOKENS=256`
 
 Operational meaning:
 
 - expensive failed splice attempts should now fail over sooner;
-- full fallback is still allowed a slightly larger retry budget;
+- full fallback keeps only a small retry budget;
+- before a full-length render, server now runs a short `greeting probe`;
+- `duration_artifact` no longer hard-fails greeting by itself, it stays only in diagnostics;
 - if latency stays high even after this change, inspect `greeting_attempts` in `server_timing.log` before rebuilding the profile.
