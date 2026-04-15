@@ -322,6 +322,18 @@ Production audio postprocess was strengthened after real cases with multi-second
   - `PHRASE_POLL_INTERVAL` now defaults to `5`
   - phrase/splice API submit timeouts now default to `150s`
   - health/status timeouts are configurable separately
+- `splice` is now the default production path for any phrase that successfully splits into `greeting + body`:
+  - grouped tasks still benefit from better shared-body reuse
+  - singleton split-able tasks no longer go straight to full phrase
+  - full phrase remains only for non-splittable texts or real splice fallback
+- a production cache-reuse lesson was confirmed:
+  - if the script repeats the lead's name inside the trailing body/signoff, every lead gets a different `body`
+  - splice still works, but body-cache reuse drops sharply
+  - best practice is to keep personalization in `greeting` and keep the reusable `body` identical
+- a fast protection path was added for expensive failed splice attempts:
+  - `GREETING_SPLICE_MAX_ATTEMPTS` defaults to `3`
+  - `GREETING_FULL_PHRASE_MAX_ATTEMPTS` defaults to `5`
+  - this limits the price of bad splice greeting retries without shrinking the retry budget of the rarer full fallback too aggressively
 - timing instrumentation was extended for slow-batch расследование:
   - `task_worker_timing.log` now includes production task API calls such as `Tasks/List`, progress updates, and task completion calls
   - `task_worker.process_phrases.prepare` shows how much time is spent before the first splice/full submission
@@ -339,6 +351,8 @@ QWEN_TTS_STATUS_TIMEOUT_SECONDS=30
 QWEN_TTS_PROFILE_REQUEST_TIMEOUT_SECONDS=180
 QWEN_TTS_PHRASE_REQUEST_TIMEOUT_SECONDS=150
 QWEN_TTS_SPLICE_REQUEST_TIMEOUT_SECONDS=150
+GREETING_SPLICE_MAX_ATTEMPTS=3
+GREETING_FULL_PHRASE_MAX_ATTEMPTS=5
 ```
 
 Operational note:
@@ -352,6 +366,8 @@ Operational note:
 - phrases generated during the brief over-trim regression window must also be regenerated because the stored WAVs are already cut
 - if `splice_failures` and `phrase_fallback_full` grow together, that means failed splice attempts are pushing work onto the slower full-phrase path
 - if the dominant splice errors are `Read timed out`, increasing greeting retries will not help; the fix is to address API hangs / timeouts first
+- after the retry-budget split, a healthy splice path should never show `greeting_attempts > GREETING_SPLICE_MAX_ATTEMPTS`
+- if latency stays high while `body_cache_hit` is already high, the next place to inspect is `greeting_attempts` inside `api.splice_synthesize.total`
 
 ## 8) Windows Watchdog
 

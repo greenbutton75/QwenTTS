@@ -4,6 +4,24 @@ This runbook is for production incidents where one `voice_id` starts producing b
 
 Use the narrowest recovery path that solves the actual problem.
 
+## 1a. One more common cause of "slow splice"
+
+Before touching profile or cache, check whether the body text is really shared.
+
+If the script repeats the lead's name inside the trailing body/signoff, for example:
+
+- `Again, Audrey...`
+- `Again, Marty...`
+- `Again, Ivan...`
+
+then every lead gets a different `body`, so shared `splice_cache` reuse collapses.
+
+In that case:
+
+- profile recovery is not the right first step;
+- the better fix is to normalize task text so the name stays only in `greeting`;
+- after the text change, rerun phrase tasks and let a new shared body cache build naturally.
+
 ## 1. Choose the right path
 
 ### Text-only rerun
@@ -46,6 +64,7 @@ In this path:
 - Do not manually delete `support/{support_id}/phrases/*.wav` unless you really need to.
   Re-running the same `phrase_id` overwrites the old `.wav` and `.json`.
 - If a current `xvector_only=true` profile and its `body` cache already sound good, keep that profile and test only the new server logic first.
+- If the defect is only "slow splice" and the body differs by lead name, fix task text first and do not rebuild the profile yet.
 
 ## 3. Common variables
 
@@ -287,6 +306,7 @@ Notes:
 - this path does **not** rebuild the profile;
 - this path does **not** clear `splice_cache/`;
 - the same `phrase_id` will overwrite the old phrase `.wav` and `.json` in S3.
+- this is also the correct path when you want to remove a second personalized name from the body/signoff to improve shared body-cache reuse.
 
 ### 8.3 Delete local sqlite tasks for that voice
 
@@ -340,3 +360,16 @@ For the tested voice:
 - current `body` cache is good;
 - `content_aware=true` should stay enabled;
 - short greeting cleanup fix is required so `Hi, Dennis.` does not become `Hi De..`.
+
+## 10. Fast splice cost limiter
+
+The server now uses separate greeting retry budgets:
+
+- `GREETING_SPLICE_MAX_ATTEMPTS=3`
+- `GREETING_FULL_PHRASE_MAX_ATTEMPTS=5`
+
+Operational meaning:
+
+- expensive failed splice attempts should now fail over sooner;
+- full fallback is still allowed a slightly larger retry budget;
+- if latency stays high even after this change, inspect `greeting_attempts` in `server_timing.log` before rebuilding the profile.

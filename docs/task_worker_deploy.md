@@ -158,6 +158,18 @@ The server-side output cleanup was extended to handle real production failures:
   - `PHRASE_POLL_INTERVAL` default changed from `15` to `5`
   - `POST /phrases` and `POST /phrases/splice-prod` submit timeouts default to `150s`
   - health/status timeouts are configurable separately
+- `splice` is now attempted for every split-able phrase, not only for grouped phrases:
+  - if `_split_greeting_body(...)` succeeds, worker goes to splice first even for singleton tasks
+  - grouping still matters for shared-body batching and cache reuse, but no longer decides whether splice is allowed at all
+  - full phrase is now reserved for non-splittable texts or real splice fallback
+- production showed that repeated lead names inside the body/signoff destroy body-cache reuse:
+  - examples like `Again, Audrey...` / `Again, Marty...` create different `body` text for every lead
+  - worker may still group less often and the server gets more unique body cache keys
+  - best practice is to keep names in greeting only and leave the reusable body identical
+- a fast mitigation was added for costly failed splice attempts:
+  - `GREETING_SPLICE_MAX_ATTEMPTS=3`
+  - `GREETING_FULL_PHRASE_MAX_ATTEMPTS=5`
+  - splice now fails over sooner, while full fallback keeps a slightly wider retry budget
 - timing coverage was extended for investigation of long non-GPU pauses:
   - `task_worker_timing.log` now records production task API calls such as `list_tasks`, `update_progress`, and task completion/failure updates
   - `task_worker.process_phrases.prepare` measures the batch-preparation window before the first splice/full submission
@@ -179,6 +191,8 @@ QWEN_TTS_STATUS_TIMEOUT_SECONDS=30
 QWEN_TTS_PROFILE_REQUEST_TIMEOUT_SECONDS=180
 QWEN_TTS_PHRASE_REQUEST_TIMEOUT_SECONDS=150
 QWEN_TTS_SPLICE_REQUEST_TIMEOUT_SECONDS=150
+GREETING_SPLICE_MAX_ATTEMPTS=3
+GREETING_FULL_PHRASE_MAX_ATTEMPTS=5
 ```
 
 Operational note:
@@ -192,6 +206,8 @@ Operational note:
 - if `splice_failures` grows together with `phrase_fallback_full`, the full-phrase path is being used as the expensive recovery path after failed splice attempts
 - if splice failures are dominated by `Read timed out`, increasing greeting retries is not the right fix; address API hangs/timeouts first
 - if a current `xvector_only=true` profile and its `body` cache already sound good, keep that profile and validate only the new server code before reprocessing the voice again
+- if `body_cache_hit` is already high but phrase latency is still large, inspect `greeting_attempts` in `server_timing.log`
+- after the retry-budget split, `splice` should never exceed `GREETING_SPLICE_MAX_ATTEMPTS`; long latency above that point means the voice/profile itself is unstable on short greetings
 
 ## Health counter notes
 

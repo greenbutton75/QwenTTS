@@ -506,6 +506,19 @@ See `docs/watchdog.md` for configuration, recovery logic, and required env overr
   - вызовы `task_worker -> API` получили отдельные timeout env;
   - default timeout для `POST /phrases` и `POST /phrases/splice-prod` уменьшен до `150` секунд;
   - worker теперь быстрее замечает готовые фразы и меньше времени теряет на подвисших splice/full запросах.
+- `splice` теперь стал основным путём для любой фразы, которую удалось разбить на `greeting + body`:
+  - grouped tasks по-прежнему дают дополнительную выгоду через shared-body reuse;
+  - singleton split-able tasks больше не уходят сразу в full phrase;
+  - full phrase остаётся только для non-splittable текстов или как настоящий fallback.
+- Подтверждён важный production-урок про cache reuse:
+  - если в конце body/signoff повторяется имя лида (`Again, Audrey...`, `Again, Marty...`), то для каждого лида получается разный `body`;
+  - splice всё ещё работает, но shared `body` cache reuse почти пропадает;
+  - best practice: персонализацию держать в `greeting`, а общий `body` оставлять идентичным.
+- Добавлен быстрый вариант B для ограничения цены неудачного splice:
+  - greeting retry budget теперь разделён для splice и full phrase;
+  - `GREETING_SPLICE_MAX_ATTEMPTS` default `3`;
+  - `GREETING_FULL_PHRASE_MAX_ATTEMPTS` default `5`;
+  - это удешевляет неудачный splice, не трогая более редкий full fallback слишком жёстко.
 - Расширено timing-логирование для расследования idle / slow batch windows:
   - в `task_worker_timing.log` теперь логируются не только вызовы к локальному API, но и обращения к production task API (`Tasks/List`, `ChangeTaskProgress`, `CompleteTask`);
   - добавлен отдельный span подготовки batch: `task_worker.process_phrases.prepare`;
@@ -529,6 +542,8 @@ QWEN_TTS_STATUS_TIMEOUT_SECONDS=30
 QWEN_TTS_PROFILE_REQUEST_TIMEOUT_SECONDS=180
 QWEN_TTS_PHRASE_REQUEST_TIMEOUT_SECONDS=150
 QWEN_TTS_SPLICE_REQUEST_TIMEOUT_SECONDS=150
+GREETING_SPLICE_MAX_ATTEMPTS=3
+GREETING_FULL_PHRASE_MAX_ATTEMPTS=5
 ```
 
 Операционно это значит:
@@ -543,6 +558,8 @@ QWEN_TTS_SPLICE_REQUEST_TIMEOUT_SECONDS=150
 - если `splice_failures` растёт одновременно с `phrase_fallback_full`, это означает, что дорогой full-phrase путь используется как следствие неуспешного splice;
 - если в логах при этом доминируют `Read timed out`, проблема в зависающем API/splice path, а не в слишком маленьком количестве greeting retries.
 - если текущий `xvector_only=true` profile и его `body` cache уже звучат хорошо, не нужно заново refresh-ить profile перед проверкой новых серверных фиксов: сначала выкатывайте код и проверяйте тот же `voice_id`.
+- если `splice` уже основной путь, а latency всё ещё высокая, смотрите в `server_timing.log` поля `greeting_attempts` и `api.splice_synthesize.total`;
+- после разделения retry budgets у splice не должно быть `greeting_attempts > GREETING_SPLICE_MAX_ATTEMPTS`; если и с этим голос остаётся медленным, проблема уже в самом voice/profile, а не в cache или merge.
 
 ## Возможности
 
