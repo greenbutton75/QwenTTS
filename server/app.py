@@ -52,6 +52,7 @@ from .tts import (
     generate_body_with_quality_retry,
     generate_voice,
     generate_voice_with_similarity_retry,
+    greeting_splice_generate_configs,
     is_fatal_cuda_error,
     splice_speech_segments,
     wav_from_bytes,
@@ -278,6 +279,7 @@ def _synthesize_spliced_phrase(
             similarity_check=GREETING_SPEAKER_SIMILARITY_CHECK,
         ):
             if GREETING_SPEAKER_SIMILARITY_CHECK:
+                splice_initial_generate_config, splice_retry_generate_config = greeting_splice_generate_configs()
                 greeting_wav, sr_greeting, greeting_similarity, greeting_attempts, greeting_similarity_passed, greeting_quality = (
                     generate_voice_with_similarity_retry(
                         text=greeting,
@@ -285,6 +287,8 @@ def _synthesize_spliced_phrase(
                         reference_embedding=prompt_data["ref_spk_embedding"],
                         min_similarity=GREETING_SPEAKER_SIMILARITY_THRESHOLD,
                         max_attempts=GREETING_SPLICE_MAX_ATTEMPTS,
+                        initial_generate_config=splice_initial_generate_config,
+                        retry_generate_config=splice_retry_generate_config,
                     )
                 )
                 if GREETING_SPEAKER_SIMILARITY_REQUIRE_PASS and not greeting_similarity_passed:

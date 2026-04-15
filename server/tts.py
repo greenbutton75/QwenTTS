@@ -29,6 +29,8 @@ from .config import (
     REFERENCE_AUDIO_TRIM_MAX_TRAILING_MS,
     REFERENCE_AUDIO_TRIM_PAD_MS,
     body_quality_retry_generate_config,
+    greeting_splice_generate_config,
+    greeting_splice_retry_generate_config,
     greeting_similarity_retry_generate_config,
     voice_clone_generate_config,
 )
@@ -37,6 +39,8 @@ from .config import (
 _MODEL_CACHE: Dict[str, Qwen3TTSModel] = {}
 _VOICE_CLONE_GENERATE_CONFIG = voice_clone_generate_config()
 _GREETING_RETRY_GENERATE_CONFIG = greeting_similarity_retry_generate_config()
+_GREETING_SPLICE_GENERATE_CONFIG = greeting_splice_generate_config()
+_GREETING_SPLICE_RETRY_GENERATE_CONFIG = greeting_splice_retry_generate_config()
 _BODY_RETRY_GENERATE_CONFIG = body_quality_retry_generate_config()
 _H_GREETING_RE = re.compile(r"^\s*(hi|hello)\b", re.IGNORECASE)
 _SHORT_GREETING_RE = re.compile(r"^\s*(hi|hello)\s*[!,]?\s*([a-zA-Z][a-zA-Z'\-]*)\s*[!,.]?\s*$", re.IGNORECASE)
@@ -205,6 +209,8 @@ def generate_voice_with_similarity_retry(
     reference_embedding: Any,
     min_similarity: float,
     max_attempts: int,
+    initial_generate_config: Optional[Dict[str, Any]] = None,
+    retry_generate_config: Optional[Dict[str, Any]] = None,
 ) -> Tuple[np.ndarray, int, float, int, bool, Dict[str, float]]:
     total_attempts = max(1, int(max_attempts))
     best_wav = None
@@ -233,7 +239,12 @@ def generate_voice_with_similarity_retry(
     best_clean_quality = dict(best_quality)
 
     for attempt in range(1, total_attempts + 1):
-        generate_config = None if attempt == 1 else dict(_GREETING_RETRY_GENERATE_CONFIG)
+        if attempt == 1:
+            generate_config = None if initial_generate_config is None else dict(initial_generate_config)
+        else:
+            generate_config = dict(_GREETING_RETRY_GENERATE_CONFIG)
+            if retry_generate_config is not None:
+                generate_config.update(retry_generate_config)
         wav, sr = generate_voice(text, voice_prompt, generate_config=generate_config)
         similarity = speaker_similarity(wav, sr, reference_embedding)
         onset_stats = detect_greeting_onset_artifact(text, wav, sr)
@@ -281,6 +292,10 @@ def generate_voice_with_similarity_retry(
     if best_clean_wav is not None:
         return best_clean_wav, best_clean_sr, best_clean_similarity, total_attempts, False, best_clean_quality
     return best_wav, best_sr, best_similarity, total_attempts, False, best_quality
+
+
+def greeting_splice_generate_configs() -> Tuple[Dict[str, Any], Dict[str, Any]]:
+    return dict(_GREETING_SPLICE_GENERATE_CONFIG), dict(_GREETING_SPLICE_RETRY_GENERATE_CONFIG)
 
 
 def detect_body_boundary_artifacts(text: str, wav: np.ndarray, sr: int) -> Dict[str, float]:

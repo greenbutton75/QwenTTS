@@ -147,6 +147,35 @@ class ServerGenerationStabilityTests(unittest.TestCase):
         self.assertEqual(quality["onset_artifact"], 0)
         self.assertEqual(generate_mock.call_count, 2)
 
+    def test_similarity_retry_uses_custom_generate_configs(self) -> None:
+        wav = np.zeros(8, dtype=np.float32)
+        initial_config = {"max_new_tokens": 123}
+        retry_config = {"max_new_tokens": 456, "top_k": 9}
+        with patch.object(server_tts, "generate_voice", side_effect=[(wav, 24000), (wav, 24000)]) as generate_mock, \
+             patch.object(server_tts, "speaker_similarity", side_effect=[0.21, 0.81]), \
+             patch.object(server_tts, "detect_greeting_onset_artifact", return_value={"artifact": 0, "checked": 1}), \
+             patch.object(server_tts, "detect_greeting_leading_preroll_artifact", return_value={"artifact": 0, "checked": 1}), \
+             patch.object(server_tts, "detect_greeting_excessive_duration_artifact", return_value={"artifact": 0, "checked": 1}), \
+             patch.object(server_tts, "detect_greeting_clipped_ending_artifact", return_value={"artifact": 0, "checked": 1}):
+            out_wav, sr, similarity, attempts, passed, quality = server_tts.generate_voice_with_similarity_retry(
+                text="Hi, Kevin,",
+                voice_prompt=["prompt"],
+                reference_embedding=np.array([0.1, 0.2], dtype=np.float32),
+                min_similarity=0.55,
+                max_attempts=3,
+                initial_generate_config=initial_config,
+                retry_generate_config=retry_config,
+            )
+
+        self.assertTrue(np.array_equal(out_wav, wav))
+        self.assertEqual(sr, 24000)
+        self.assertAlmostEqual(similarity, 0.81, places=6)
+        self.assertEqual(attempts, 2)
+        self.assertTrue(passed)
+        self.assertEqual(generate_mock.call_args_list[0].kwargs["generate_config"]["max_new_tokens"], 123)
+        self.assertEqual(generate_mock.call_args_list[1].kwargs["generate_config"]["max_new_tokens"], 456)
+        self.assertEqual(generate_mock.call_args_list[1].kwargs["generate_config"]["top_k"], 9)
+
     def test_similarity_retry_returns_best_attempt_when_threshold_not_met(self) -> None:
         wav1 = np.full(8, 0.1, dtype=np.float32)
         wav2 = np.full(8, 0.2, dtype=np.float32)

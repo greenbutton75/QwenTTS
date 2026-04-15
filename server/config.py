@@ -71,6 +71,10 @@ GREETING_SPLICE_MAX_ATTEMPTS = _get_env_int(
     "GREETING_SPLICE_MAX_ATTEMPTS",
     min(GREETING_FULL_PHRASE_MAX_ATTEMPTS, 3),
 )
+GREETING_SPLICE_MAX_NEW_TOKENS = _get_env_int(
+    "GREETING_SPLICE_MAX_NEW_TOKENS",
+    min(VOICE_CLONE_MAX_NEW_TOKENS, 256),
+)
 GREETING_SPEAKER_SIMILARITY_REQUIRE_PASS = _get_env_bool("GREETING_SPEAKER_SIMILARITY_REQUIRE_PASS", False)
 GREETING_ONSET_ARTIFACT_CHECK = _get_env_bool("GREETING_ONSET_ARTIFACT_CHECK", True)
 GREETING_ONSET_ARTIFACT_REQUIRE_PASS = _get_env_bool("GREETING_ONSET_ARTIFACT_REQUIRE_PASS", True)
@@ -128,6 +132,18 @@ def greeting_similarity_retry_generate_config() -> dict:
             top_k=GREETING_SPEAKER_SIMILARITY_RETRY_TOP_K,
             top_p=GREETING_SPEAKER_SIMILARITY_RETRY_TOP_P,
         )
+    return config
+
+
+def greeting_splice_generate_config() -> dict:
+    config = voice_clone_generate_config()
+    config["max_new_tokens"] = GREETING_SPLICE_MAX_NEW_TOKENS
+    return config
+
+
+def greeting_splice_retry_generate_config() -> dict:
+    config = greeting_similarity_retry_generate_config()
+    config["max_new_tokens"] = GREETING_SPLICE_MAX_NEW_TOKENS
     return config
 
 
