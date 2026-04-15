@@ -67,6 +67,7 @@ sys.modules.pop("server.config", None)
 sys.modules.pop("server.tts", None)
 
 server_tts = importlib.import_module("server.tts")
+server_config = importlib.import_module("server.config")
 
 
 class FakeModel:
@@ -87,6 +88,10 @@ class FakeTimingLogger:
 
 
 class ServerGenerationStabilityTests(unittest.TestCase):
+    def test_greeting_attempt_defaults_split_full_and_splice(self) -> None:
+        self.assertEqual(server_config.GREETING_FULL_PHRASE_MAX_ATTEMPTS, 2)
+        self.assertEqual(server_config.GREETING_SPLICE_MAX_ATTEMPTS, 3)
+
     def test_is_fatal_cuda_error_detects_device_assert(self) -> None:
         self.assertTrue(server_tts.is_fatal_cuda_error("CUDA error: device-side assert triggered"))
         self.assertFalse(server_tts.is_fatal_cuda_error("timeout waiting for phrase"))
