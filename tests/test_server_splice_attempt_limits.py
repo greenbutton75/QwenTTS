@@ -45,6 +45,27 @@ class ServerSpliceAttemptLimitTests(unittest.TestCase):
 
         self.fail("generate_voice_with_similarity_retry(custom splice generate configs) not found in server/app.py")
 
+    def test_splice_path_passes_attempt_timing_context(self) -> None:
+        tree = ast.parse(Path("server/app.py").read_text(encoding="utf-8"))
+
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.Call):
+                continue
+            if not isinstance(node.func, ast.Name):
+                continue
+            if node.func.id != "generate_voice_with_similarity_retry":
+                continue
+            keyword_names = {kw.arg: kw.value for kw in node.keywords if kw.arg}
+            timing_logger = keyword_names.get("timing_logger")
+            attempt_operation = keyword_names.get("attempt_operation")
+            self.assertIsInstance(timing_logger, ast.Name)
+            self.assertEqual(timing_logger.id, "timing_logger")
+            self.assertIsInstance(attempt_operation, ast.Constant)
+            self.assertEqual(attempt_operation.value, "api.splice_synthesize.greeting_attempt")
+            return
+
+        self.fail("generate_voice_with_similarity_retry(attempt timing context) not found in server/app.py")
+
 
 if __name__ == "__main__":
     unittest.main()

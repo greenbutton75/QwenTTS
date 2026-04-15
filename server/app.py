@@ -277,7 +277,7 @@ def _synthesize_spliced_phrase(
             voice_id=voice_id,
             greeting_chars=len(greeting or ""),
             similarity_check=GREETING_SPEAKER_SIMILARITY_CHECK,
-        ):
+        ) as greeting_span:
             if GREETING_SPEAKER_SIMILARITY_CHECK:
                 splice_initial_generate_config, splice_retry_generate_config = greeting_splice_generate_configs()
                 greeting_wav, sr_greeting, greeting_similarity, greeting_attempts, greeting_similarity_passed, greeting_quality = (
@@ -289,7 +289,32 @@ def _synthesize_spliced_phrase(
                         max_attempts=GREETING_SPLICE_MAX_ATTEMPTS,
                         initial_generate_config=splice_initial_generate_config,
                         retry_generate_config=splice_retry_generate_config,
+                        timing_logger=timing_logger,
+                        attempt_operation="api.splice_synthesize.greeting_attempt",
+                        timing_fields={
+                            "support_id": support_id,
+                            "voice_id": voice_id,
+                            "greeting_chars": len(greeting or ""),
+                        },
                     )
+                )
+                greeting_span.set(
+                    greeting_attempts=greeting_attempts,
+                    greeting_similarity=greeting_similarity,
+                    greeting_similarity_passed=greeting_similarity_passed,
+                    greeting_start_passed=bool(greeting_quality.get("start_passed", 1)),
+                    greeting_passed=bool(greeting_quality.get("greeting_passed", greeting_quality.get("start_passed", 1))),
+                    greeting_onset_artifact=bool(greeting_quality.get("onset_artifact", 0)),
+                    greeting_duration_artifact=bool(greeting_quality.get("duration_artifact", 0)),
+                    greeting_ending_artifact=bool(greeting_quality.get("ending_artifact", 0)),
+                    greeting_preroll_artifact=bool(greeting_quality.get("preroll_artifact", 0)),
+                )
+                span.set(
+                    greeting_attempts=greeting_attempts,
+                    greeting_similarity=greeting_similarity,
+                    greeting_similarity_passed=greeting_similarity_passed,
+                    greeting_start_passed=bool(greeting_quality.get("start_passed", 1)),
+                    greeting_passed=bool(greeting_quality.get("greeting_passed", greeting_quality.get("start_passed", 1))),
                 )
                 if GREETING_SPEAKER_SIMILARITY_REQUIRE_PASS and not greeting_similarity_passed:
                     raise HTTPException(

@@ -1,4 +1,5 @@
 import io
+import logging
 import re
 import tempfile
 import threading
@@ -10,6 +11,7 @@ import soundfile as sf
 from pydub import AudioSegment
 
 from qwen_tts import Qwen3TTSModel, VoiceClonePromptItem
+from timing_utils import timed_operation
 
 from .config import (
     BODY_QUALITY_CHECK,
@@ -28,6 +30,7 @@ from .config import (
     REFERENCE_AUDIO_TRIM_MAX_LEADING_MS,
     REFERENCE_AUDIO_TRIM_MAX_TRAILING_MS,
     REFERENCE_AUDIO_TRIM_PAD_MS,
+    VOICE_CLONE_MAX_NEW_TOKENS,
     body_quality_retry_generate_config,
     greeting_splice_generate_config,
     greeting_splice_retry_generate_config,
@@ -211,6 +214,9 @@ def generate_voice_with_similarity_retry(
     max_attempts: int,
     initial_generate_config: Optional[Dict[str, Any]] = None,
     retry_generate_config: Optional[Dict[str, Any]] = None,
+    timing_logger: Optional[logging.Logger] = None,
+    attempt_operation: Optional[str] = None,
+    timing_fields: Optional[Dict[str, Any]] = None,
 ) -> Tuple[np.ndarray, int, float, int, bool, Dict[str, float]]:
     total_attempts = max(1, int(max_attempts))
     best_wav = None
@@ -237,6 +243,7 @@ def generate_voice_with_similarity_retry(
     best_clean_sr = 0
     best_clean_similarity = float("-inf")
     best_clean_quality = dict(best_quality)
+    base_timing_fields = dict(timing_fields or {})
 
     for attempt in range(1, total_attempts + 1):
         if attempt == 1:
@@ -245,37 +252,90 @@ def generate_voice_with_similarity_retry(
             generate_config = dict(_GREETING_RETRY_GENERATE_CONFIG)
             if retry_generate_config is not None:
                 generate_config.update(retry_generate_config)
-        wav, sr = generate_voice(text, voice_prompt, generate_config=generate_config)
-        similarity = speaker_similarity(wav, sr, reference_embedding)
-        onset_stats = detect_greeting_onset_artifact(text, wav, sr)
-        preroll_stats = detect_greeting_leading_preroll_artifact(text, wav, sr)
-        duration_stats = detect_greeting_excessive_duration_artifact(text, wav, sr)
-        ending_stats = detect_greeting_clipped_ending_artifact(text, wav, sr)
-        onset_passed = int(not onset_stats.get("artifact", 0))
-        preroll_passed = int(not preroll_stats.get("artifact", 0))
-        duration_passed = int(not duration_stats.get("artifact", 0))
-        ending_passed = int(not ending_stats.get("artifact", 0))
-        quality = {
-            "similarity_passed": int(similarity >= float(min_similarity)),
-            "onset_artifact": int(onset_stats.get("artifact", 0)),
-            "onset_checked": int(onset_stats.get("checked", 0)),
-            "onset_passed": onset_passed,
-            "duration_artifact": int(duration_stats.get("artifact", 0)),
-            "duration_checked": int(duration_stats.get("checked", 0)),
-            "duration_passed": duration_passed,
-            "ending_artifact": int(ending_stats.get("artifact", 0)),
-            "ending_checked": int(ending_stats.get("checked", 0)),
-            "ending_passed": ending_passed,
-            "preroll_artifact": int(preroll_stats.get("artifact", 0)),
-            "preroll_checked": int(preroll_stats.get("checked", 0)),
-            "preroll_passed": preroll_passed,
-            "start_passed": int(onset_passed and preroll_passed),
-            "greeting_passed": int(onset_passed and preroll_passed and duration_passed and ending_passed),
-            **onset_stats,
-            **{f"duration_{key}": value for key, value in duration_stats.items() if key not in {"artifact", "checked"}},
-            **{f"ending_{key}": value for key, value in ending_stats.items() if key not in {"artifact", "checked"}},
-            **{f"preroll_{key}": value for key, value in preroll_stats.items() if key not in {"artifact", "checked"}},
-        }
+        quality: Dict[str, float] = {}
+        if timing_logger is not None and attempt_operation:
+            with timed_operation(
+                timing_logger,
+                attempt_operation,
+                **base_timing_fields,
+                attempt=attempt,
+                max_attempts=total_attempts,
+                generate_max_new_tokens=(generate_config or {}).get("max_new_tokens", VOICE_CLONE_MAX_NEW_TOKENS),
+                retry_mode=int(attempt > 1),
+            ) as attempt_span:
+                wav, sr = generate_voice(text, voice_prompt, generate_config=generate_config)
+                similarity = speaker_similarity(wav, sr, reference_embedding)
+                onset_stats = detect_greeting_onset_artifact(text, wav, sr)
+                preroll_stats = detect_greeting_leading_preroll_artifact(text, wav, sr)
+                duration_stats = detect_greeting_excessive_duration_artifact(text, wav, sr)
+                ending_stats = detect_greeting_clipped_ending_artifact(text, wav, sr)
+                onset_passed = int(not onset_stats.get("artifact", 0))
+                preroll_passed = int(not preroll_stats.get("artifact", 0))
+                duration_passed = int(not duration_stats.get("artifact", 0))
+                ending_passed = int(not ending_stats.get("artifact", 0))
+                quality = {
+                    "similarity_passed": int(similarity >= float(min_similarity)),
+                    "onset_artifact": int(onset_stats.get("artifact", 0)),
+                    "onset_checked": int(onset_stats.get("checked", 0)),
+                    "onset_passed": onset_passed,
+                    "duration_artifact": int(duration_stats.get("artifact", 0)),
+                    "duration_checked": int(duration_stats.get("checked", 0)),
+                    "duration_passed": duration_passed,
+                    "ending_artifact": int(ending_stats.get("artifact", 0)),
+                    "ending_checked": int(ending_stats.get("checked", 0)),
+                    "ending_passed": ending_passed,
+                    "preroll_artifact": int(preroll_stats.get("artifact", 0)),
+                    "preroll_checked": int(preroll_stats.get("checked", 0)),
+                    "preroll_passed": preroll_passed,
+                    "start_passed": int(onset_passed and preroll_passed),
+                    "greeting_passed": int(onset_passed and preroll_passed and duration_passed and ending_passed),
+                    **onset_stats,
+                    **{f"duration_{key}": value for key, value in duration_stats.items() if key not in {"artifact", "checked"}},
+                    **{f"ending_{key}": value for key, value in ending_stats.items() if key not in {"artifact", "checked"}},
+                    **{f"preroll_{key}": value for key, value in preroll_stats.items() if key not in {"artifact", "checked"}},
+                }
+                attempt_span.set(
+                    similarity=round(float(similarity), 6),
+                    similarity_passed=quality["similarity_passed"],
+                    start_passed=quality["start_passed"],
+                    greeting_passed=quality["greeting_passed"],
+                    onset_artifact=quality["onset_artifact"],
+                    preroll_artifact=quality["preroll_artifact"],
+                    duration_artifact=quality["duration_artifact"],
+                    ending_artifact=quality["ending_artifact"],
+                )
+        else:
+            wav, sr = generate_voice(text, voice_prompt, generate_config=generate_config)
+            similarity = speaker_similarity(wav, sr, reference_embedding)
+            onset_stats = detect_greeting_onset_artifact(text, wav, sr)
+            preroll_stats = detect_greeting_leading_preroll_artifact(text, wav, sr)
+            duration_stats = detect_greeting_excessive_duration_artifact(text, wav, sr)
+            ending_stats = detect_greeting_clipped_ending_artifact(text, wav, sr)
+            onset_passed = int(not onset_stats.get("artifact", 0))
+            preroll_passed = int(not preroll_stats.get("artifact", 0))
+            duration_passed = int(not duration_stats.get("artifact", 0))
+            ending_passed = int(not ending_stats.get("artifact", 0))
+            quality = {
+                "similarity_passed": int(similarity >= float(min_similarity)),
+                "onset_artifact": int(onset_stats.get("artifact", 0)),
+                "onset_checked": int(onset_stats.get("checked", 0)),
+                "onset_passed": onset_passed,
+                "duration_artifact": int(duration_stats.get("artifact", 0)),
+                "duration_checked": int(duration_stats.get("checked", 0)),
+                "duration_passed": duration_passed,
+                "ending_artifact": int(ending_stats.get("artifact", 0)),
+                "ending_checked": int(ending_stats.get("checked", 0)),
+                "ending_passed": ending_passed,
+                "preroll_artifact": int(preroll_stats.get("artifact", 0)),
+                "preroll_checked": int(preroll_stats.get("checked", 0)),
+                "preroll_passed": preroll_passed,
+                "start_passed": int(onset_passed and preroll_passed),
+                "greeting_passed": int(onset_passed and preroll_passed and duration_passed and ending_passed),
+                **onset_stats,
+                **{f"duration_{key}": value for key, value in duration_stats.items() if key not in {"artifact", "checked"}},
+                **{f"ending_{key}": value for key, value in ending_stats.items() if key not in {"artifact", "checked"}},
+                **{f"preroll_{key}": value for key, value in preroll_stats.items() if key not in {"artifact", "checked"}},
+            }
         if similarity > best_similarity or best_wav is None:
             best_wav = wav
             best_sr = sr

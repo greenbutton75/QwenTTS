@@ -1,4 +1,5 @@
 import importlib
+import json
 import os
 import sys
 import types
@@ -75,6 +76,14 @@ class FakeModel:
     def generate_voice_clone(self, **kwargs):
         self.kwargs = kwargs
         return [np.zeros(8, dtype=np.float32)], 24000
+
+
+class FakeTimingLogger:
+    def __init__(self) -> None:
+        self.messages = []
+
+    def info(self, message: str) -> None:
+        self.messages.append(json.loads(message))
 
 
 class ServerGenerationStabilityTests(unittest.TestCase):
@@ -175,6 +184,38 @@ class ServerGenerationStabilityTests(unittest.TestCase):
         self.assertEqual(generate_mock.call_args_list[0].kwargs["generate_config"]["max_new_tokens"], 123)
         self.assertEqual(generate_mock.call_args_list[1].kwargs["generate_config"]["max_new_tokens"], 456)
         self.assertEqual(generate_mock.call_args_list[1].kwargs["generate_config"]["top_k"], 9)
+
+    def test_similarity_retry_logs_per_attempt_timing(self) -> None:
+        wav = np.zeros(8, dtype=np.float32)
+        logger = FakeTimingLogger()
+        with patch.object(server_tts, "generate_voice", side_effect=[(wav, 24000), (wav, 24000)]), \
+             patch.object(server_tts, "speaker_similarity", side_effect=[0.21, 0.81]), \
+             patch.object(server_tts, "detect_greeting_onset_artifact", return_value={"artifact": 0, "checked": 1}), \
+             patch.object(server_tts, "detect_greeting_leading_preroll_artifact", return_value={"artifact": 0, "checked": 1}), \
+             patch.object(server_tts, "detect_greeting_excessive_duration_artifact", return_value={"artifact": 0, "checked": 1}), \
+             patch.object(server_tts, "detect_greeting_clipped_ending_artifact", return_value={"artifact": 0, "checked": 1}):
+            server_tts.generate_voice_with_similarity_retry(
+                text="Hi, Kevin,",
+                voice_prompt=["prompt"],
+                reference_embedding=np.array([0.1, 0.2], dtype=np.float32),
+                min_similarity=0.55,
+                max_attempts=3,
+                initial_generate_config={"max_new_tokens": 123},
+                retry_generate_config={"max_new_tokens": 456},
+                timing_logger=logger,
+                attempt_operation="api.splice_synthesize.greeting_attempt",
+                timing_fields={"support_id": "82938", "voice_id": "voice-1"},
+            )
+
+        self.assertEqual(len(logger.messages), 2)
+        self.assertEqual(logger.messages[0]["op"], "api.splice_synthesize.greeting_attempt")
+        self.assertEqual(logger.messages[0]["attempt"], 1)
+        self.assertEqual(logger.messages[0]["generate_max_new_tokens"], 123)
+        self.assertEqual(logger.messages[0]["retry_mode"], 0)
+        self.assertEqual(logger.messages[1]["attempt"], 2)
+        self.assertEqual(logger.messages[1]["generate_max_new_tokens"], 456)
+        self.assertEqual(logger.messages[1]["retry_mode"], 1)
+        self.assertEqual(logger.messages[1]["greeting_passed"], 1)
 
     def test_similarity_retry_returns_best_attempt_when_threshold_not_met(self) -> None:
         wav1 = np.full(8, 0.1, dtype=np.float32)

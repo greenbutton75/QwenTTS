@@ -226,7 +226,7 @@ class Worker:
                 "start_passed": 1,
                 "greeting_passed": 1,
             }
-            with timed_operation(self.timing_logger, "api.worker.phrase.generate", support_id=support_id, voice_id=voice_id, phrase_id=phrase_id):
+            with timed_operation(self.timing_logger, "api.worker.phrase.generate", support_id=support_id, voice_id=voice_id, phrase_id=phrase_id) as phrase_span:
                 if isinstance(text, str) and text.strip().lower().startswith(("hi ", "hi,", "hello ", "hello,")):
                     (
                         wav,
@@ -241,6 +241,25 @@ class Worker:
                         reference_embedding=prompt_data["ref_spk_embedding"],
                         min_similarity=GREETING_SPEAKER_SIMILARITY_THRESHOLD,
                         max_attempts=GREETING_FULL_PHRASE_MAX_ATTEMPTS,
+                        timing_logger=self.timing_logger,
+                        attempt_operation="api.worker.phrase.greeting_attempt",
+                        timing_fields={
+                            "support_id": support_id,
+                            "voice_id": voice_id,
+                            "phrase_id": phrase_id,
+                            "text_chars": len(text or ""),
+                        },
+                    )
+                    phrase_span.set(
+                        greeting_attempts=greeting_attempts,
+                        greeting_similarity=greeting_similarity,
+                        greeting_similarity_passed=greeting_similarity_passed,
+                        greeting_start_passed=bool(greeting_quality.get("start_passed", 1)),
+                        greeting_passed=bool(greeting_quality.get("greeting_passed", greeting_quality.get("start_passed", 1))),
+                        greeting_onset_artifact=bool(greeting_quality.get("onset_artifact", 0)),
+                        greeting_duration_artifact=bool(greeting_quality.get("duration_artifact", 0)),
+                        greeting_ending_artifact=bool(greeting_quality.get("ending_artifact", 0)),
+                        greeting_preroll_artifact=bool(greeting_quality.get("preroll_artifact", 0)),
                     )
                     if GREETING_SPEAKER_SIMILARITY_REQUIRE_PASS and not greeting_similarity_passed:
                         raise RuntimeError(
