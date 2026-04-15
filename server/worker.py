@@ -7,7 +7,7 @@ from .cache_utils import prompt_fingerprint
 from .config import LOG_BACKUPS, LOG_DIR, LOG_MAX_BYTES
 from .config import (
     GREETING_ONSET_ARTIFACT_REQUIRE_PASS,
-    GREETING_SPEAKER_SIMILARITY_MAX_ATTEMPTS,
+    GREETING_FULL_PHRASE_MAX_ATTEMPTS,
     GREETING_SPEAKER_SIMILARITY_REQUIRE_PASS,
     GREETING_SPEAKER_SIMILARITY_THRESHOLD,
     MAX_RETRIES,
@@ -240,7 +240,7 @@ class Worker:
                         voice_prompt=voice_prompt,
                         reference_embedding=prompt_data["ref_spk_embedding"],
                         min_similarity=GREETING_SPEAKER_SIMILARITY_THRESHOLD,
-                        max_attempts=GREETING_SPEAKER_SIMILARITY_MAX_ATTEMPTS,
+                        max_attempts=GREETING_FULL_PHRASE_MAX_ATTEMPTS,
                     )
                     if GREETING_SPEAKER_SIMILARITY_REQUIRE_PASS and not greeting_similarity_passed:
                         raise RuntimeError(

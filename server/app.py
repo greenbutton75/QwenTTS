@@ -16,7 +16,7 @@ from .config import (
     BODY_QUALITY_REQUIRE_PASS,
     GREETING_ONSET_ARTIFACT_REQUIRE_PASS,
     GREETING_SPEAKER_SIMILARITY_CHECK,
-    GREETING_SPEAKER_SIMILARITY_MAX_ATTEMPTS,
+    GREETING_SPLICE_MAX_ATTEMPTS,
     GREETING_SPEAKER_SIMILARITY_REQUIRE_PASS,
     GREETING_SPEAKER_SIMILARITY_THRESHOLD,
     body_quality_config,
@@ -284,7 +284,7 @@ def _synthesize_spliced_phrase(
                         voice_prompt=voice_prompt,
                         reference_embedding=prompt_data["ref_spk_embedding"],
                         min_similarity=GREETING_SPEAKER_SIMILARITY_THRESHOLD,
-                        max_attempts=GREETING_SPEAKER_SIMILARITY_MAX_ATTEMPTS,
+                        max_attempts=GREETING_SPLICE_MAX_ATTEMPTS,
                     )
                 )
                 if GREETING_SPEAKER_SIMILARITY_REQUIRE_PASS and not greeting_similarity_passed:
