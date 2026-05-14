@@ -511,7 +511,7 @@ def generate_body_with_quality_retry(
     for attempt in range(1, total_attempts + 1):
         generate_config = None if attempt == 1 else dict(_BODY_RETRY_GENERATE_CONFIG)
         wav, sr = generate_voice(text, voice_prompt, generate_config=generate_config)
-        cleaned_wav, cleaned_sr, trim_stats = clean_output_audio(wav, sr)
+        cleaned_wav, cleaned_sr, trim_stats = clean_output_audio_preserve_tail(wav, sr)
         quality = detect_body_boundary_artifacts(text, cleaned_wav, cleaned_sr)
         if best_wav is None:
             best_wav = cleaned_wav
@@ -1326,6 +1326,7 @@ def trim_low_clarity_boundary_blocks(
     sr: int,
     *,
     pad_ms: int,
+    allow_trailing_trim: bool = True,
     min_boundary_ms: int = 10000,
     chunk_ms: int = 10000,
     hop_ms: int = 5000,
@@ -1429,7 +1430,7 @@ def trim_low_clarity_boundary_blocks(
     pad_samples = max(0, int(sr * pad_ms / 1000.0))
     if leading_ms >= int(min_boundary_ms):
         start_sample = max(0, int(chunk_metrics[first_good]["start"]) - pad_samples)
-    if trailing_ms >= int(min_boundary_ms):
+    if allow_trailing_trim and trailing_ms >= int(min_boundary_ms):
         end_sample = min(total_samples, int(chunk_metrics[last_good]["end"]) + pad_samples)
     if end_sample <= start_sample + max(1, frame_samples):
         return audio, default
@@ -1451,6 +1452,7 @@ def refine_local_clarity_boundaries(
     sr: int,
     *,
     pad_ms: int,
+    allow_trailing_trim: bool = True,
     inspect_ms: int = 8000,
     min_leading_gap_ms: int = 1000,
     min_trailing_gap_ms: int = 2000,
@@ -1532,7 +1534,7 @@ def refine_local_clarity_boundaries(
                 if prior.size > 0 and float(np.max(prior)) <= 0.90:
                     start_sample = max(0, head_offsets[first_good] - pad_samples)
 
-    if tail_scores:
+    if allow_trailing_trim and tail_scores:
         tail_scores_arr = np.asarray(tail_scores, dtype=np.float32)
         good_idx = np.where(tail_scores_arr >= 1.0)[0]
         if good_idx.size > 0:
@@ -1589,6 +1591,7 @@ def _clean_output_audio_impl(
     max_leading_ms: int,
     max_trailing_ms: int,
     allow_leading_artifact_trim: bool = True,
+    preserve_tail: bool = False,
 ) -> Tuple[np.ndarray, int, Dict[str, int]]:
     audio = _normalize_audio(wav)
     if not OUTPUT_AUDIO_TRIM_ENABLED:
@@ -1607,30 +1610,33 @@ def _clean_output_audio_impl(
         }
         return audio, int(sr), stats
 
+    effective_max_trailing_ms = 0 if preserve_tail else max_trailing_ms
     edge_cleaned, edge_stats = trim_audio_edges(
         audio,
         sr=int(sr),
         pad_ms=pad_ms,
         max_leading_ms=max_leading_ms,
-        max_trailing_ms=max_trailing_ms,
+        max_trailing_ms=effective_max_trailing_ms,
     )
     boundary_cleaned, boundary_stats = trim_low_energy_boundary_artifacts(
         edge_cleaned,
         sr=int(sr),
         pad_ms=pad_ms,
         max_leading_ms=(OUTPUT_AUDIO_TRIM_MAX_LEADING_MS if allow_leading_artifact_trim else 0),
-        max_trailing_ms=max_trailing_ms,
+        max_trailing_ms=effective_max_trailing_ms,
         allow_leading_artifact_trim=allow_leading_artifact_trim,
     )
     clarity_cleaned, clarity_stats = trim_low_clarity_boundary_blocks(
         boundary_cleaned,
         sr=int(sr),
         pad_ms=pad_ms,
+        allow_trailing_trim=not preserve_tail,
     )
     local_clarity_cleaned, local_clarity_stats = refine_local_clarity_boundaries(
         clarity_cleaned,
         sr=int(sr),
         pad_ms=pad_ms,
+        allow_trailing_trim=not preserve_tail,
     )
     compacted, silence_stats = compact_internal_silences(
         local_clarity_cleaned,
@@ -1692,6 +1698,18 @@ def clean_output_audio_preserve_start(wav: np.ndarray, sr: int) -> Tuple[np.ndar
         max_leading_ms=OUTPUT_AUDIO_TRIM_MAX_LEADING_MS,
         max_trailing_ms=OUTPUT_AUDIO_TRIM_MAX_TRAILING_MS,
         allow_leading_artifact_trim=True,
+    )
+
+
+def clean_output_audio_preserve_tail(wav: np.ndarray, sr: int) -> Tuple[np.ndarray, int, Dict[str, int]]:
+    return _clean_output_audio_impl(
+        wav,
+        sr,
+        pad_ms=OUTPUT_AUDIO_TRIM_PAD_MS,
+        max_leading_ms=OUTPUT_AUDIO_TRIM_MAX_LEADING_MS,
+        max_trailing_ms=OUTPUT_AUDIO_TRIM_MAX_TRAILING_MS,
+        allow_leading_artifact_trim=True,
+        preserve_tail=True,
     )
 
 

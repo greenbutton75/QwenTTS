@@ -34,7 +34,7 @@ def _install_test_stubs() -> None:
             self.__dict__.update(kwargs)
 
     fake_qwen_tts.VoiceClonePromptItem = FakeVoiceClonePromptItem
-    sys.modules.setdefault("qwen_tts", fake_qwen_tts)
+    sys.modules["qwen_tts"] = fake_qwen_tts
 
     fake_db = types.ModuleType("server.db")
 
@@ -101,6 +101,7 @@ def _install_test_stubs() -> None:
         )
     )
     fake_tts.clean_output_audio_preserve_start = fake_tts.clean_output_audio
+    fake_tts.clean_output_audio_preserve_tail = fake_tts.clean_output_audio
     fake_tts.clean_output_audio_for_greeting = lambda text, wav, sr: fake_tts.clean_output_audio(wav, sr)
     fake_tts.clean_output_audio_for_spliced_phrase = fake_tts.clean_output_audio
     fake_tts.clean_reference_audio = (
@@ -115,11 +116,12 @@ def _install_test_stubs() -> None:
     fake_tts.splice_speech_segments = lambda **kwargs: np.zeros(8, dtype=np.float32)
     fake_tts.wav_from_bytes = lambda data: (np.zeros(8, dtype=np.float32), 24000)
     fake_tts.wav_to_bytes = lambda wav, sr: b"WAV"
-    sys.modules.setdefault("server.tts", fake_tts)
+    sys.modules["server.tts"] = fake_tts
 
 
 _seed_env()
 _install_test_stubs()
+sys.modules.pop("server.worker", None)
 
 from server.cache_utils import body_cache_hash, prompt_fingerprint
 
@@ -335,7 +337,7 @@ class ServerCacheLogicTests(unittest.TestCase):
         }
         with patch.object(server_worker, "download_torch", return_value=prompt_data), \
              patch.object(server_worker, "generate_voice_with_similarity_retry", return_value=(np.zeros(8, dtype=np.float32), 24000, 0.91, 2, True, quality)) as retry_mock, \
-             patch.object(server_worker, "clean_output_audio_for_greeting", return_value=(np.zeros(8, dtype=np.float32), 24000, {"trimmed": 0, "leading_ms": 0, "trailing_ms": 0, "original_ms": 0, "cleaned_ms": 0})), \
+             patch.object(server_worker, "clean_output_audio_preserve_tail", return_value=(np.zeros(8, dtype=np.float32), 24000, {"trimmed": 0, "leading_ms": 0, "trailing_ms": 0, "original_ms": 0, "cleaned_ms": 0})), \
              patch.object(server_worker, "write_wav_temp", return_value="tmp.wav"), \
              patch.object(server_worker, "upload_file"), \
              patch.object(server_worker, "create_presigned_url", return_value="https://example.invalid/audio.wav"), \
@@ -382,7 +384,7 @@ class ServerCacheLogicTests(unittest.TestCase):
         with patch.object(server_worker, "download_torch", return_value=prompt_data), \
              patch.object(server_worker, "generate_voice_with_similarity_retry", return_value=(np.zeros(8, dtype=np.float32), 24000, 0.91, 2, True, quality)) as retry_mock, \
              patch.object(server_worker, "generate_voice", return_value=(np.zeros(8, dtype=np.float32), 24000)) as full_generate_mock, \
-             patch.object(server_worker, "clean_output_audio", return_value=(np.zeros(8, dtype=np.float32), 24000, {"trimmed": 0, "leading_ms": 0, "trailing_ms": 0, "original_ms": 0, "cleaned_ms": 0})) as clean_mock, \
+             patch.object(server_worker, "clean_output_audio_preserve_tail", return_value=(np.zeros(8, dtype=np.float32), 24000, {"trimmed": 0, "leading_ms": 0, "trailing_ms": 0, "original_ms": 0, "cleaned_ms": 0})) as clean_mock, \
              patch.object(server_worker, "write_wav_temp", return_value="tmp.wav"), \
              patch.object(server_worker, "upload_file"), \
              patch.object(server_worker, "create_presigned_url", return_value="https://example.invalid/audio.wav"), \

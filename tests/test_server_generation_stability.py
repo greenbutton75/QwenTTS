@@ -410,6 +410,25 @@ class ServerGenerationStabilityTests(unittest.TestCase):
 
         self.assertEqual(trim_mock.call_args.kwargs["pad_ms"], server_tts.GREETING_OUTPUT_TRIM_PAD_MS)
 
+    def test_clean_output_audio_preserve_tail_disables_trailing_boundary_trims(self) -> None:
+        wav = np.full(16, 0.1, dtype=np.float32)
+        edge_stats = {"trimmed": 0, "leading_ms": 0, "trailing_ms": 0, "original_ms": 1, "cleaned_ms": 1}
+        boundary_stats = {"trimmed": 0, "leading_ms": 0, "trailing_ms": 0, "original_ms": 1, "cleaned_ms": 1}
+        clarity_stats = {"trimmed": 0, "leading_ms": 0, "trailing_ms": 0, "original_ms": 1, "cleaned_ms": 1}
+        silence_stats = {"compressed": 0, "spans": 0, "removed_ms": 0, "original_ms": 1, "cleaned_ms": 1}
+        with patch.object(server_tts, "trim_audio_edges", return_value=(wav, edge_stats)) as trim_mock, \
+             patch.object(server_tts, "trim_low_energy_boundary_artifacts", return_value=(wav, boundary_stats)) as boundary_mock, \
+             patch.object(server_tts, "trim_low_clarity_boundary_blocks", return_value=(wav, clarity_stats)) as clarity_mock, \
+             patch.object(server_tts, "refine_local_clarity_boundaries", return_value=(wav, clarity_stats)) as local_clarity_mock, \
+             patch.object(server_tts, "compact_internal_silences", return_value=(wav, silence_stats)):
+            _, _, stats = server_tts.clean_output_audio_preserve_tail(wav, 24000)
+
+        self.assertEqual(trim_mock.call_args.kwargs["max_trailing_ms"], 0)
+        self.assertEqual(boundary_mock.call_args.kwargs["max_trailing_ms"], 0)
+        self.assertFalse(clarity_mock.call_args.kwargs["allow_trailing_trim"])
+        self.assertFalse(local_clarity_mock.call_args.kwargs["allow_trailing_trim"])
+        self.assertEqual(stats["trailing_ms"], 0)
+
     def test_clean_output_audio_for_short_greeting_disables_trailing_trim(self) -> None:
         wav = np.full(16, 0.1, dtype=np.float32)
         edge_stats = {"trimmed": 0, "leading_ms": 0, "trailing_ms": 0, "original_ms": 1, "cleaned_ms": 1}
@@ -760,7 +779,7 @@ class ServerGenerationStabilityTests(unittest.TestCase):
         wav_good = np.full(16, 0.2, dtype=np.float32)
         trim_stats = {"trimmed": 0, "leading_ms": 0, "trailing_ms": 0, "original_ms": 1, "cleaned_ms": 1}
         with patch.object(server_tts, "generate_voice", side_effect=[(wav_bad, 24000), (wav_good, 24000)]) as generate_mock, \
-             patch.object(server_tts, "clean_output_audio", side_effect=[(wav_bad, 24000, trim_stats), (wav_good, 24000, trim_stats)]), \
+             patch.object(server_tts, "clean_output_audio_preserve_tail", side_effect=[(wav_bad, 24000, trim_stats), (wav_good, 24000, trim_stats)]), \
              patch.object(
                  server_tts,
                  "detect_body_boundary_artifacts",
