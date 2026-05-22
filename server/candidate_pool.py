@@ -164,6 +164,14 @@ def _body_is_good(report: "quality.QualityReport", max_wer: float) -> bool:
     return True
 
 
+def body_candidate_acceptable(report: "quality.QualityReport") -> bool:
+    """Whether a selected body candidate is good enough to ship. Uses the body
+    WER bar (BODY_ASR_MAX_WER), NOT the strict greeting bar inside
+    QualityReport.all_checks_passed -- spelled-out phone numbers legitimately
+    push body WER into the 0.20-0.35 range."""
+    return _body_is_good(report, BODY_ASR_MAX_WER)
+
+
 def generate_body_candidates(
     text: str,
     voice_prompt,

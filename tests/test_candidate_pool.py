@@ -195,6 +195,15 @@ class BodyBestOfNTests(unittest.TestCase):
         self.assertFalse(cp._body_is_good(_body_report(wer=0.1, artifact=True), 0.35))
         self.assertFalse(cp._body_is_good(_body_report(wer=0.1, sim_passed=False), 0.35))
 
+    def test_body_acceptable_uses_lenient_wer_not_all_checks(self) -> None:
+        # WER 0.30 (spelled-out phone numbers): all_checks_passed would be False
+        # (strict 0.20 greeting bar) but the body is acceptable for shipping.
+        report = _body_report(wer=0.30)
+        self.assertFalse(report.all_checks_passed)  # strict 0.20 -> fails
+        self.assertTrue(cp.body_candidate_acceptable(report))  # 0.35 body bar -> ok
+        # Genuinely bad body still rejected.
+        self.assertFalse(cp.body_candidate_acceptable(_body_report(wer=0.9)))
+
 
 if __name__ == "__main__":
     unittest.main()

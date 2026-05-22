@@ -204,7 +204,7 @@ def _load_or_generate_body_wav(
                 body_chars=len(body or ""),
             ):
                 if BODY_BEST_OF_N_ENABLED:
-                    from .candidate_pool import generate_body_candidates, select_best
+                    from .candidate_pool import generate_body_candidates, select_best, body_candidate_acceptable
 
                     body_cands = generate_body_candidates(
                         text=body,
@@ -215,7 +215,8 @@ def _load_or_generate_body_wav(
                     body_best = select_best(body_cands)
                     body_wav, sr_body = body_best.wav, int(body_best.sr)
                     body_attempts = len(body_cands)
-                    body_passed = bool(body_best.report.all_checks_passed)
+                    # Body WER bar (0.35), not the strict greeting bar in all_checks_passed.
+                    body_passed = bool(body_candidate_acceptable(body_best.report))
                     body_trim = {}
                     _body_asr = body_best.report.asr
                     body_quality = {
