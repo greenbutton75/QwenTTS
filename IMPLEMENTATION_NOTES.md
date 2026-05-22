@@ -6,12 +6,39 @@ needs validation on the GPU box.
 
 ## Status
 
-- **Phase 1 — DONE (pending GPU validation).** ASR layer, unified quality
+- **Phase 1 — DONE, validated on the RTX 4090 box.** ASR layer, unified quality
   evaluation, composite score, diagnostic-mode integration, benchmark harness,
-  unit tests.
-- **Phase 2 — not started.** best-of-N greeting, ASR hard-gate, `candidate_pool.py`,
-  per-voice similarity threshold.
+  unit tests. Real Whisper large-v3 transcribes generated audio (~0.4s/clip).
+- **Phase 2 — DONE, validated on the RTX 4090 box.** best-of-N greeting
+  (`candidate_pool.py`), duration penalty in composite score, optional ASR
+  hard-gate, app.py splice wiring. **Not** done: per-voice similarity threshold
+  (spec 2.4) and batched candidate generation (sequential only) — deferred.
 - **Phase 3 — not started.** `reference_validator.py`, body best-of-N, body ASR gate.
+
+## Root-cause finding (from GPU validation)
+
+The dominant defect is a **max_new_tokens runaway**: when the model fails to emit
+EOS for a greeting it generates to the cap (`GREETING_SPLICE_MAX_NEW_TOKENS=256`
+≈ **20.48s** at 12.5 Hz) of leading silence / speech-like noise, and the greeting
+text is lost. The existing similarity/onset heuristics passed these (similarity
+stayed ~0.88-0.96). best-of-N dodges them: the runaway candidate scores ~0.08
+(WER 1.0 + duration penalty) vs ~2.45 for a clean candidate.
+
+### Before / after (voice 63180/ab196dbb, body "This is Alex…")
+
+| greeting | before (Phase 1) | after (Phase 2 best-of-N) |
+|---|---|---|
+| Hi, Aleksandra. | 25.2s, greeting dropped, WER 0.18 | 5.13s, WER 0.0 |
+| Hi, Dennis. | 9.97s, greeting dropped, WER 0.18 | 4.91s, WER 0.0 |
+| Hello, Mike. | 14.4s, ~8s noise, WER 0.0 | 4.83s, WER 0.0 |
+| Hi, Sarah. (control) | 5.76s, WER 0.0 | 4.97s, WER 0.0 |
+| Hi, Al. (control) | 5.70s, WER 0.0 | 4.81s, WER 0.0 |
+
+### Calibration note
+The greeting `excessive_duration` threshold flags some legitimate ~2.5s
+greetings (`duration_artifact=1`). It is a score penalty only (not a hard fail),
+so selection is unaffected, but the threshold could be loosened during weight
+calibration.
 
 ## Phase 1 — what was added
 
