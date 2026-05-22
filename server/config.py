@@ -137,7 +137,11 @@ SCORE_P_BODY_CLIPPED = _get_env_float("SCORE_P_BODY_CLIPPED", 0.30)
 SCORE_P_DURATION = _get_env_float("SCORE_P_DURATION", 0.30)
 
 # --- Quality Gate (Phase 2): best-of-N greeting selection ---
-GREETING_BEST_OF_N_ENABLED = _get_env_bool("GREETING_BEST_OF_N_ENABLED", False)
+# Default ON: rolled out to prod after validation. onstart re-clones main and
+# rebuilds /etc/qwentts.env from the template, so a code default is the durable
+# switch (env-only flags would silently revert on instance recreate). Set the
+# env var to false to disable.
+GREETING_BEST_OF_N_ENABLED = _get_env_bool("GREETING_BEST_OF_N_ENABLED", True)
 GREETING_BEST_OF_N_COUNT = _get_env_int("GREETING_BEST_OF_N_COUNT", 4)
 GREETING_ASR_CHECK = _get_env_bool("GREETING_ASR_CHECK", True)
 GREETING_ASR_REQUIRE_PASS = _get_env_bool("GREETING_ASR_REQUIRE_PASS", False)
@@ -145,7 +149,8 @@ GREETING_ASR_REQUIRE_PASS = _get_env_bool("GREETING_ASR_REQUIRE_PASS", False)
 # --- Quality Gate (Phase 3): adaptive best-of-N for the body / long render ---
 # Adaptive: keep a good greedy render (1 generation); regenerate only when the
 # body is bad (ASR garble / artifact), then pick the best candidate.
-BODY_BEST_OF_N_ENABLED = _get_env_bool("BODY_BEST_OF_N_ENABLED", False)
+# Default ON (rolled out after validation; see GREETING_BEST_OF_N_ENABLED note).
+BODY_BEST_OF_N_ENABLED = _get_env_bool("BODY_BEST_OF_N_ENABLED", True)
 BODY_BEST_OF_N_MAX_COUNT = _get_env_int("BODY_BEST_OF_N_MAX_COUNT", 3)
 # WER bar for accepting a body greedy render. Looser than the greeting bar
 # because spelled-out phone numbers inflate WER on legitimate audio.
