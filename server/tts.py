@@ -26,6 +26,9 @@ from .config import (
     OUTPUT_AUDIO_TRIM_MAX_LEADING_MS,
     OUTPUT_AUDIO_TRIM_MAX_TRAILING_MS,
     OUTPUT_AUDIO_TRIM_PAD_MS,
+    SPLICE_TRAILING_SILENCE_TRIM_ENABLED,
+    SPLICE_TRAILING_SILENCE_PAD_MS,
+    SPLICE_TRAILING_SILENCE_MIN_MS,
     REFERENCE_AUDIO_TRIM_ENABLED,
     REFERENCE_AUDIO_TRIM_MAX_LEADING_MS,
     REFERENCE_AUDIO_TRIM_MAX_TRAILING_MS,
@@ -1737,6 +1740,40 @@ def clean_output_audio_without_leading_trim(wav: np.ndarray, sr: int) -> Tuple[n
     )
 
 
+def trim_trailing_silence(
+    wav: np.ndarray,
+    sr: int,
+    pad_ms: int,
+    min_trailing_ms: int,
+    frame_ms: int = 20,
+    hop_ms: int = 10,
+    min_run_frames: int = 3,
+) -> Tuple[np.ndarray, Dict[str, int]]:
+    """Remove trailing non-speech beyond the last real speech + pad.
+
+    Conservative: a final word stays (it is above the speech threshold); only the
+    silence/noise tail is removed, and only when it exceeds ``min_trailing_ms``.
+    """
+    audio = _normalize_audio(wav)
+    total = int(audio.shape[0])
+    noop = {"trimmed": 0, "trailing_removed_ms": 0}
+    if total == 0:
+        return audio, noop
+    speech_like, frame_samples, hop_samples = _speech_frame_mask(audio, sr=int(sr), frame_ms=frame_ms, hop_ms=hop_ms)
+    if speech_like.size == 0:
+        return audio, noop
+    end_frame = _find_active_run_end(speech_like, min_run=min_run_frames)
+    if end_frame is None:
+        return audio, noop
+    last_speech_sample = min(total, end_frame * hop_samples + frame_samples)
+    pad_samples = max(0, int(sr * pad_ms / 1000.0))
+    cut = min(total, last_speech_sample + pad_samples)
+    trailing_ms = int(round((total - cut) * 1000.0 / sr))
+    if trailing_ms < int(min_trailing_ms):
+        return audio, noop
+    return audio[:cut], {"trimmed": 1, "trailing_removed_ms": trailing_ms}
+
+
 def clean_output_audio_for_spliced_phrase(wav: np.ndarray, sr: int) -> Tuple[np.ndarray, int, Dict[str, int]]:
     audio = _normalize_audio(wav)
     original_ms = int(round(audio.shape[0] * 1000.0 / sr)) if sr else 0
@@ -1767,10 +1804,18 @@ def clean_output_audio_for_spliced_phrase(wav: np.ndarray, sr: int) -> Tuple[np.
         sr=int(sr),
         max_internal_silence_ms=OUTPUT_AUDIO_MAX_INTERNAL_SILENCE_MS,
     )
+    trailing_stats = {"trimmed": 0, "trailing_removed_ms": 0}
+    if SPLICE_TRAILING_SILENCE_TRIM_ENABLED:
+        compacted, trailing_stats = trim_trailing_silence(
+            compacted,
+            sr=int(sr),
+            pad_ms=SPLICE_TRAILING_SILENCE_PAD_MS,
+            min_trailing_ms=SPLICE_TRAILING_SILENCE_MIN_MS,
+        )
     stats = {
-        "trimmed": int(silence_stats.get("compressed", 0)),
+        "trimmed": int(bool(silence_stats.get("compressed", 0)) or bool(trailing_stats.get("trimmed", 0))),
         "leading_ms": 0,
-        "trailing_ms": 0,
+        "trailing_ms": int(trailing_stats.get("trailing_removed_ms", 0)),
         "boundary_artifact_trimmed": 0,
         "boundary_leading_ms": 0,
         "boundary_trailing_ms": 0,
@@ -1780,6 +1825,8 @@ def clean_output_audio_for_spliced_phrase(wav: np.ndarray, sr: int) -> Tuple[np.
         "local_clarity_boundary_trimmed": 0,
         "local_clarity_leading_ms": 0,
         "local_clarity_trailing_ms": 0,
+        "trailing_silence_trimmed": int(trailing_stats.get("trimmed", 0)),
+        "trailing_silence_removed_ms": int(trailing_stats.get("trailing_removed_ms", 0)),
         "internal_silence_compressed": int(silence_stats.get("compressed", 0)),
         "internal_silence_spans": int(silence_stats.get("spans", 0)),
         "internal_silence_removed_ms": int(silence_stats.get("removed_ms", 0)),

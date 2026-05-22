@@ -151,6 +151,13 @@ BODY_BEST_OF_N_MAX_COUNT = _get_env_int("BODY_BEST_OF_N_MAX_COUNT", 3)
 # because spelled-out phone numbers inflate WER on legitimate audio.
 BODY_ASR_MAX_WER = _get_env_float("BODY_ASR_MAX_WER", 0.35)
 
+# Conservative trailing-silence trim on the final merged phrase. VAD finds the
+# last real speech; only clearly non-speech tail beyond the pad is removed, so a
+# final word cannot be cut. Default on (it only ever removes silence/noise).
+SPLICE_TRAILING_SILENCE_TRIM_ENABLED = _get_env_bool("SPLICE_TRAILING_SILENCE_TRIM_ENABLED", True)
+SPLICE_TRAILING_SILENCE_PAD_MS = _get_env_int("SPLICE_TRAILING_SILENCE_PAD_MS", 500)
+SPLICE_TRAILING_SILENCE_MIN_MS = _get_env_int("SPLICE_TRAILING_SILENCE_MIN_MS", 700)
+
 
 def asr_config() -> dict:
     return {

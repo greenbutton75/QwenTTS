@@ -53,7 +53,10 @@ GREETING_SPLIT_RE = re.compile(
 def _split_greeting_body(text: str):
     if not isinstance(text, str):
         return None
-    raw = text.strip()
+    # Strip leading quotes/whitespace so a quoted greeting (e.g. a curly-quoted
+    # "Hi Name, ...") still splits and gets the protected splice path instead of
+    # falling through to the unprotected full-phrase render.
+    raw = text.strip().lstrip("\"'“”‘’`").strip()
     if not raw:
         return None
     match = GREETING_SPLIT_RE.match(raw)

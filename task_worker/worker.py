@@ -184,7 +184,10 @@ def _normalize_body_for_grouping(text: str) -> str:
 def _split_greeting_body(text: str) -> Optional[Tuple[str, str]]:
     if not isinstance(text, str):
         return None
-    raw = text.strip()
+    # Strip leading quotes/whitespace so a quoted greeting (e.g. a curly-quoted
+    # "Hi Name, ...") still routes to the protected splice path instead of the
+    # unprotected full-phrase render.
+    raw = text.strip().lstrip("\"'“”‘’`").strip()
     if not raw:
         return None
     m = GREETING_RE.match(raw)

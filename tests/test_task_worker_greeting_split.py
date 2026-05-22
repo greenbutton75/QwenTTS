@@ -72,6 +72,8 @@ class TaskWorkerGreetingSplitTests(unittest.TestCase):
             ("hello, Kevin! This is Fred", ("hello, Kevin!", "This is Fred")),
             ("Hello,O'Neil! This is Fred", ("Hello,O'Neil!", "This is Fred")),
             ("Hi, Anne-Marie, this is Fred", ("Hi, Anne-Marie,", "this is Fred")),
+            ("“Hi Riley, this is Fred", ("Hi Riley,", "this is Fred")),
+            ('"Hi Kevin, this is Fred', ("Hi Kevin,", "this is Fred")),
         ]
 
         for text, expected in cases:
