@@ -63,12 +63,27 @@ for mod in ("server.config", "server.tts", "server.asr", "server.quality", "serv
 
 cp = importlib.import_module("server.candidate_pool")
 quality = importlib.import_module("server.quality")
+asr = importlib.import_module("server.asr")
 
 
 def _report(score, passed):
     r = quality.QualityReport(similarity=0.8, similarity_passed=True, asr=None, asr_passed=True)
     r.composite_score = score
     r.all_checks_passed = passed
+    return r
+
+
+def _body_report(wer, sim_passed=True, artifact=False, score=None):
+    asr_rep = asr.ASRReport(
+        transcript_raw="x", transcript_normalized="x", target_normalized="x",
+        wer=wer, cer=wer, has_prefix_extra=False,
+    )
+    r = quality.QualityReport(
+        similarity=0.9, similarity_passed=sim_passed, asr=asr_rep, asr_passed=(wer <= 0.2),
+        start_artifact=artifact,
+    )
+    r.composite_score = score if score is not None else (0.9 + 1.5 * (1 - wer))
+    r.all_checks_passed = sim_passed and not artifact and (wer <= 0.2)
     return r
 
 
@@ -139,6 +154,46 @@ class GenerateCandidatesTests(unittest.TestCase):
     def test_build_specs_extends_beyond_base(self) -> None:
         specs = cp._build_specs(6)
         self.assertEqual(len(specs), 6)
+
+
+class BodyBestOfNTests(unittest.TestCase):
+    def _patches(self, eval_side_effect):
+        return (
+            patch.object(cp.tts, "generate_voice", return_value=(np.zeros(8, dtype=np.float32), 24000)),
+            patch.object(cp.tts, "clean_output_audio_preserve_tail", return_value=(np.zeros(8, dtype=np.float32), 24000, {})),
+            patch.object(cp.quality, "evaluate_candidate", side_effect=eval_side_effect),
+        )
+
+    def test_keeps_good_greedy_single_render(self) -> None:
+        # greedy is good -> adaptive stops after 1 generation.
+        p1, p2, p3 = self._patches(lambda **k: _body_report(wer=0.1))
+        with p1 as gen, p2, p3:
+            cands = cp.generate_body_candidates(
+                text="body", voice_prompt=[object()],
+                reference_embedding=np.ones(4, dtype=np.float32), max_n=3,
+            )
+        self.assertEqual(len(cands), 1)
+        self.assertEqual(gen.call_count, 1)
+
+    def test_regenerates_when_greedy_bad_and_picks_best(self) -> None:
+        # greedy garbled (wer 0.9), then a clean candidate appears.
+        reports = iter([_body_report(wer=0.9), _body_report(wer=0.05), _body_report(wer=0.5)])
+        p1, p2, p3 = self._patches(lambda **k: next(reports))
+        with p1 as gen, p2, p3:
+            cands = cp.generate_body_candidates(
+                text="body", voice_prompt=[object()],
+                reference_embedding=np.ones(4, dtype=np.float32), max_n=3,
+            )
+        self.assertEqual(len(cands), 3)
+        self.assertEqual(gen.call_count, 3)
+        best = cp.select_best(cands)
+        self.assertAlmostEqual(best.report.asr.wer, 0.05)
+
+    def test_body_is_good_helper(self) -> None:
+        self.assertTrue(cp._body_is_good(_body_report(wer=0.1), 0.35))
+        self.assertFalse(cp._body_is_good(_body_report(wer=0.9), 0.35))
+        self.assertFalse(cp._body_is_good(_body_report(wer=0.1, artifact=True), 0.35))
+        self.assertFalse(cp._body_is_good(_body_report(wer=0.1, sim_passed=False), 0.35))
 
 
 if __name__ == "__main__":

@@ -14,6 +14,7 @@ from .config import ADMIN_PASSWORD, ADMIN_USER, LANGUAGE, MODEL_SIZE, S3_PREFIX,
 from .config import voice_clone_generate_config
 from .config import (
     ASR_DIAGNOSTIC_MODE,
+    BODY_BEST_OF_N_ENABLED,
     BODY_QUALITY_REQUIRE_PASS,
     GREETING_ASR_REQUIRE_PASS,
     GREETING_BEST_OF_N_COUNT,
@@ -202,10 +203,34 @@ def _load_or_generate_body_wav(
                 body_hash=body_hash,
                 body_chars=len(body or ""),
             ):
-                body_wav, sr_body, body_attempts, body_passed, body_quality, body_trim = generate_body_with_quality_retry(
-                    body,
-                    voice_prompt,
-                )
+                if BODY_BEST_OF_N_ENABLED:
+                    from .candidate_pool import generate_body_candidates, select_best
+
+                    body_cands = generate_body_candidates(
+                        text=body,
+                        voice_prompt=voice_prompt,
+                        reference_embedding=prompt_data["ref_spk_embedding"],
+                        ref_text=prompt_data.get("ref_text"),
+                    )
+                    body_best = select_best(body_cands)
+                    body_wav, sr_body = body_best.wav, int(body_best.sr)
+                    body_attempts = len(body_cands)
+                    body_passed = bool(body_best.report.all_checks_passed)
+                    body_trim = {}
+                    _body_asr = body_best.report.asr
+                    body_quality = {
+                        "best_of_n": body_attempts,
+                        "best_label": body_best.spec.label,
+                        "composite_score": round(body_best.score, 4),
+                        "similarity": round(body_best.report.similarity, 4),
+                        "asr_wer": round(_body_asr.wer, 4) if _body_asr is not None else None,
+                        "all_checks_passed": body_passed,
+                    }
+                else:
+                    body_wav, sr_body, body_attempts, body_passed, body_quality, body_trim = generate_body_with_quality_retry(
+                        body,
+                        voice_prompt,
+                    )
                 if BODY_QUALITY_REQUIRE_PASS and not body_passed:
                     raise HTTPException(status_code=422, detail="body boundary artifact detected in all attempts")
                 body_bytes = wav_to_bytes(body_wav, int(sr_body))

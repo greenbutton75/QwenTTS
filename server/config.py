@@ -142,6 +142,15 @@ GREETING_BEST_OF_N_COUNT = _get_env_int("GREETING_BEST_OF_N_COUNT", 4)
 GREETING_ASR_CHECK = _get_env_bool("GREETING_ASR_CHECK", True)
 GREETING_ASR_REQUIRE_PASS = _get_env_bool("GREETING_ASR_REQUIRE_PASS", False)
 
+# --- Quality Gate (Phase 3): adaptive best-of-N for the body / long render ---
+# Adaptive: keep a good greedy render (1 generation); regenerate only when the
+# body is bad (ASR garble / artifact), then pick the best candidate.
+BODY_BEST_OF_N_ENABLED = _get_env_bool("BODY_BEST_OF_N_ENABLED", False)
+BODY_BEST_OF_N_MAX_COUNT = _get_env_int("BODY_BEST_OF_N_MAX_COUNT", 3)
+# WER bar for accepting a body greedy render. Looser than the greeting bar
+# because spelled-out phone numbers inflate WER on legitimate audio.
+BODY_ASR_MAX_WER = _get_env_float("BODY_ASR_MAX_WER", 0.35)
+
 
 def asr_config() -> dict:
     return {

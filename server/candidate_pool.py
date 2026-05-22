@@ -18,8 +18,11 @@ from typing import Any, Dict, List, Optional
 import numpy as np
 
 from .config import (
+    BODY_ASR_MAX_WER,
+    BODY_BEST_OF_N_MAX_COUNT,
     GREETING_ASR_CHECK,
     GREETING_SPEAKER_SIMILARITY_THRESHOLD,
+    VOICE_CLONE_MAX_NEW_TOKENS,
     VOICE_CLONE_NON_STREAMING_MODE,
     VOICE_CLONE_REPETITION_PENALTY,
     GREETING_SPLICE_MAX_NEW_TOKENS,
@@ -130,6 +133,87 @@ def generate_greeting_candidates(
         candidates.append(
             Candidate(spec=spec, wav=wav, sr=sr, generate_latency_ms=gen_ms, report=report, score=report.composite_score)
         )
+    return candidates
+
+
+def _body_specs(n: int) -> List[CandidateSpec]:
+    """Like _base_specs but with the full body token budget."""
+    common = {
+        "non_streaming_mode": VOICE_CLONE_NON_STREAMING_MODE,
+        "max_new_tokens": VOICE_CLONE_MAX_NEW_TOKENS,
+        "repetition_penalty": VOICE_CLONE_REPETITION_PENALTY,
+    }
+    specs = [
+        CandidateSpec("greedy", {**common, "do_sample": False}, seed=None),
+        CandidateSpec("sample_lo", {**common, "do_sample": True, "temperature": 0.25, "top_k": 6, "top_p": 0.9}, seed=42),
+        CandidateSpec("sample_hi", {**common, "do_sample": True, "temperature": 0.35, "top_k": 10, "top_p": 0.85}, seed=137),
+    ]
+    while len(specs) < n:
+        i = len(specs)
+        specs.append(CandidateSpec(f"sample_extra_{i}", {**specs[-1].generate_config, "temperature": 0.4 + 0.05 * i}, seed=1000 + i))
+    return specs[: max(1, n)]
+
+
+def _body_is_good(report: "quality.QualityReport", max_wer: float) -> bool:
+    if not report.similarity_passed:
+        return False
+    if report.start_artifact or report.trailing_rebound_artifact or report.clipped_ending_artifact:
+        return False
+    if report.asr is not None and report.asr.wer > max_wer:
+        return False
+    return True
+
+
+def generate_body_candidates(
+    text: str,
+    voice_prompt,
+    reference_embedding: Any,
+    ref_text: Optional[str] = None,
+    max_n: Optional[int] = None,
+    similarity_threshold: Optional[float] = None,
+    do_asr: bool = True,
+    max_wer: Optional[float] = None,
+) -> List[Candidate]:
+    """Adaptive best-of-N for the body / long render.
+
+    Generates the greedy render first; if it is good (similarity ok, no boundary
+    artifact, ASR WER within ``max_wer``) it is returned alone. Otherwise up to
+    ``max_n`` sampled renders are generated and all are returned for selection.
+    Each candidate is post-processed with the tail-preserving cleanup, matching
+    the existing body path.
+    """
+    n = int(max_n or BODY_BEST_OF_N_MAX_COUNT)
+    wer_bar = BODY_ASR_MAX_WER if max_wer is None else float(max_wer)
+    threshold = (
+        float(similarity_threshold)
+        if similarity_threshold is not None
+        else GREETING_SPEAKER_SIMILARITY_THRESHOLD
+    )
+
+    candidates: List[Candidate] = []
+    for spec in _body_specs(n):
+        _seed(spec.seed)
+        started = time.time()
+        wav, sr = tts.generate_voice(text, voice_prompt, generate_config=spec.generate_config)
+        wav, sr, _ = tts.clean_output_audio_preserve_tail(wav, sr)
+        gen_ms = int((time.time() - started) * 1000)
+        report = quality.evaluate_candidate(
+            wav=wav,
+            sr=sr,
+            text=text,
+            reference_embedding=reference_embedding,
+            target_text=text,
+            ref_text=ref_text,
+            is_greeting=False,
+            do_asr=do_asr,
+            similarity_threshold=threshold,
+        )
+        candidates.append(
+            Candidate(spec=spec, wav=wav, sr=sr, generate_latency_ms=gen_ms, report=report, score=report.composite_score)
+        )
+        # Adaptive: keep the greedy render if it is already good.
+        if len(candidates) == 1 and _body_is_good(report, wer_bar):
+            break
     return candidates
 
 
