@@ -66,6 +66,24 @@ class ServerSpliceAttemptLimitTests(unittest.TestCase):
 
         self.fail("generate_voice_with_similarity_retry(attempt timing context) not found in server/app.py")
 
+    def test_best_of_n_path_calls_candidate_pool(self) -> None:
+        tree = ast.parse(Path("server/app.py").read_text(encoding="utf-8"))
+
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.Call):
+                continue
+            if not isinstance(node.func, ast.Name):
+                continue
+            if node.func.id != "generate_greeting_candidates":
+                continue
+            keyword_names = {kw.arg: kw.value for kw in node.keywords if kw.arg}
+            n_value = keyword_names.get("n")
+            self.assertIsInstance(n_value, ast.Name)
+            self.assertEqual(n_value.id, "GREETING_BEST_OF_N_COUNT")
+            return
+
+        self.fail("generate_greeting_candidates(n=GREETING_BEST_OF_N_COUNT) not found in server/app.py")
+
 
 if __name__ == "__main__":
     unittest.main()

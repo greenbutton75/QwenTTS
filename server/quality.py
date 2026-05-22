@@ -64,6 +64,7 @@ def composite_score(report: "QualityReport", weights: Optional[Dict[str, float]]
     score -= w["p_onset"] * int(report.onset_artifact)
     score -= w["p_preroll"] * int(report.preroll_artifact)
     score -= w["p_ending"] * int(report.ending_artifact)
+    score -= w.get("p_duration", 0.0) * int(report.duration_artifact)
     score -= w["p_body_start"] * int(report.start_artifact)
     score -= w["p_body_tail"] * int(report.trailing_rebound_artifact)
     score -= w["p_body_clipped"] * int(report.clipped_ending_artifact)
@@ -166,6 +167,37 @@ def evaluate_candidate(
         and not clipped_ending_artifact
     )
     return report
+
+
+def greeting_quality_fields(report: QualityReport) -> Dict[str, Any]:
+    """Flatten a greeting QualityReport into the legacy ``greeting_quality`` dict
+    that the splice path and phrase_json already consume."""
+    onset_passed = int(not report.onset_artifact)
+    preroll_passed = int(not report.preroll_artifact)
+    ending_passed = int(not report.ending_artifact)
+    duration_passed = int(not report.duration_artifact)
+
+    def _checked(metric_key: str) -> int:
+        stats = report.raw_metrics.get(metric_key) or {}
+        return int(stats.get("checked", 1))
+
+    return {
+        "similarity_passed": int(report.similarity_passed),
+        "onset_artifact": int(report.onset_artifact),
+        "onset_checked": _checked("onset"),
+        "onset_passed": onset_passed,
+        "duration_artifact": int(report.duration_artifact),
+        "duration_checked": _checked("duration"),
+        "duration_passed": duration_passed,
+        "ending_artifact": int(report.ending_artifact),
+        "ending_checked": _checked("ending"),
+        "ending_passed": ending_passed,
+        "preroll_artifact": int(report.preroll_artifact),
+        "preroll_checked": _checked("preroll"),
+        "preroll_passed": preroll_passed,
+        "start_passed": int(onset_passed and preroll_passed),
+        "greeting_passed": int(onset_passed and preroll_passed and ending_passed),
+    }
 
 
 def diagnostic_phrase_fields(report: QualityReport, gate_decision: str = "skipped") -> Dict[str, Any]:

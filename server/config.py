@@ -132,6 +132,15 @@ SCORE_P_ENDING = _get_env_float("SCORE_P_ENDING", 0.30)
 SCORE_P_BODY_START = _get_env_float("SCORE_P_BODY_START", 0.30)
 SCORE_P_BODY_TAIL = _get_env_float("SCORE_P_BODY_TAIL", 0.30)
 SCORE_P_BODY_CLIPPED = _get_env_float("SCORE_P_BODY_CLIPPED", 0.30)
+# Over-long greeting (leading silence/noise). Penalty only, never a hard fail --
+# best-of-N then picks a shorter clean candidate (see candidate_pool).
+SCORE_P_DURATION = _get_env_float("SCORE_P_DURATION", 0.30)
+
+# --- Quality Gate (Phase 2): best-of-N greeting selection ---
+GREETING_BEST_OF_N_ENABLED = _get_env_bool("GREETING_BEST_OF_N_ENABLED", False)
+GREETING_BEST_OF_N_COUNT = _get_env_int("GREETING_BEST_OF_N_COUNT", 4)
+GREETING_ASR_CHECK = _get_env_bool("GREETING_ASR_CHECK", True)
+GREETING_ASR_REQUIRE_PASS = _get_env_bool("GREETING_ASR_REQUIRE_PASS", False)
 
 
 def asr_config() -> dict:
@@ -162,6 +171,7 @@ def score_weights() -> dict:
         "p_body_start": SCORE_P_BODY_START,
         "p_body_tail": SCORE_P_BODY_TAIL,
         "p_body_clipped": SCORE_P_BODY_CLIPPED,
+        "p_duration": SCORE_P_DURATION,
     }
 
 

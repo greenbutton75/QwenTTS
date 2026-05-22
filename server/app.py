@@ -15,6 +15,9 @@ from .config import voice_clone_generate_config
 from .config import (
     ASR_DIAGNOSTIC_MODE,
     BODY_QUALITY_REQUIRE_PASS,
+    GREETING_ASR_REQUIRE_PASS,
+    GREETING_BEST_OF_N_COUNT,
+    GREETING_BEST_OF_N_ENABLED,
     GREETING_ONSET_ARTIFACT_REQUIRE_PASS,
     GREETING_SPEAKER_SIMILARITY_CHECK,
     GREETING_SPLICE_MAX_ATTEMPTS,
@@ -305,25 +308,48 @@ def _synthesize_spliced_phrase(
             similarity_check=GREETING_SPEAKER_SIMILARITY_CHECK,
         ) as greeting_span:
             if GREETING_SPEAKER_SIMILARITY_CHECK:
-                splice_initial_generate_config, splice_retry_generate_config = greeting_splice_generate_configs()
-                greeting_wav, sr_greeting, greeting_similarity, greeting_attempts, greeting_similarity_passed, greeting_quality = (
-                    generate_voice_with_similarity_retry(
+                greeting_asr_passed = True
+                if GREETING_BEST_OF_N_ENABLED:
+                    from .candidate_pool import generate_greeting_candidates, select_best
+                    from .quality import greeting_quality_fields
+
+                    candidates = generate_greeting_candidates(
                         text=greeting,
                         voice_prompt=voice_prompt,
                         reference_embedding=prompt_data["ref_spk_embedding"],
-                        min_similarity=GREETING_SPEAKER_SIMILARITY_THRESHOLD,
-                        max_attempts=GREETING_SPLICE_MAX_ATTEMPTS,
-                        initial_generate_config=splice_initial_generate_config,
-                        retry_generate_config=splice_retry_generate_config,
-                        timing_logger=timing_logger,
-                        attempt_operation="api.splice_synthesize.greeting_attempt",
-                        timing_fields={
-                            "support_id": support_id,
-                            "voice_id": voice_id,
-                            "greeting_chars": len(greeting or ""),
-                        },
+                        target_text=greeting,
+                        ref_text=prompt_data.get("ref_text"),
+                        n=GREETING_BEST_OF_N_COUNT,
+                        similarity_threshold=GREETING_SPEAKER_SIMILARITY_THRESHOLD,
                     )
-                )
+                    best = select_best(candidates)
+                    greeting_wav, sr_greeting = best.wav, int(best.sr)
+                    greeting_similarity = best.report.similarity
+                    greeting_attempts = len(candidates)
+                    greeting_similarity_passed = bool(best.report.similarity_passed)
+                    greeting_quality = greeting_quality_fields(best.report)
+                    greeting_asr_passed = bool(best.report.asr_passed)
+                    greeting_span.set(best_of_n=greeting_attempts, best_label=best.spec.label, composite_score=round(best.score, 4))
+                else:
+                    splice_initial_generate_config, splice_retry_generate_config = greeting_splice_generate_configs()
+                    greeting_wav, sr_greeting, greeting_similarity, greeting_attempts, greeting_similarity_passed, greeting_quality = (
+                        generate_voice_with_similarity_retry(
+                            text=greeting,
+                            voice_prompt=voice_prompt,
+                            reference_embedding=prompt_data["ref_spk_embedding"],
+                            min_similarity=GREETING_SPEAKER_SIMILARITY_THRESHOLD,
+                            max_attempts=GREETING_SPLICE_MAX_ATTEMPTS,
+                            initial_generate_config=splice_initial_generate_config,
+                            retry_generate_config=splice_retry_generate_config,
+                            timing_logger=timing_logger,
+                            attempt_operation="api.splice_synthesize.greeting_attempt",
+                            timing_fields={
+                                "support_id": support_id,
+                                "voice_id": voice_id,
+                                "greeting_chars": len(greeting or ""),
+                            },
+                        )
+                    )
                 greeting_span.set(
                     greeting_attempts=greeting_attempts,
                     greeting_similarity=greeting_similarity,
@@ -355,6 +381,8 @@ def _synthesize_spliced_phrase(
                     greeting_quality.get("start_passed", 1),
                 ):
                     raise HTTPException(status_code=422, detail="greeting quality artifact detected in all attempts")
+                if GREETING_ASR_REQUIRE_PASS and not greeting_asr_passed:
+                    raise HTTPException(status_code=422, detail="greeting failed ASR content check in all candidates")
                 greeting_wav, sr_greeting, _ = clean_output_audio_for_greeting(greeting, greeting_wav, sr_greeting)
             else:
                 greeting_wav, sr_greeting = generate_voice(greeting, voice_prompt)

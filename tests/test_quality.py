@@ -126,6 +126,13 @@ class CompositeScoreTests(unittest.TestCase):
         # No ASR term contribution beyond max(0, 1-0)=1 -> 0.8 + 1.5
         self.assertAlmostEqual(quality.composite_score(report), 2.3)
 
+    def test_duration_artifact_penalizes(self) -> None:
+        clean = quality.QualityReport(0.8, True, _asr_report(), True)
+        longish = quality.QualityReport(0.8, True, _asr_report(), True, duration_artifact=True)
+        self.assertAlmostEqual(
+            quality.composite_score(clean) - quality.composite_score(longish), 0.3
+        )
+
 
 class EvaluateCandidateTests(unittest.TestCase):
     def test_clean_full_phrase(self) -> None:
