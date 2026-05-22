@@ -29,8 +29,12 @@ QWEN_TTS_READY_TIMEOUT_SECONDS = int(os.getenv("QWEN_TTS_READY_TIMEOUT_SECONDS",
 QWEN_TTS_READY_POLL_INTERVAL = int(os.getenv("QWEN_TTS_READY_POLL_INTERVAL", "2"))
 QWEN_TTS_HEALTH_TIMEOUT_SECONDS = int(os.getenv("QWEN_TTS_HEALTH_TIMEOUT_SECONDS", "5"))
 QWEN_TTS_PROFILE_REQUEST_TIMEOUT_SECONDS = int(os.getenv("QWEN_TTS_PROFILE_REQUEST_TIMEOUT_SECONDS", "180"))
-QWEN_TTS_PHRASE_REQUEST_TIMEOUT_SECONDS = int(os.getenv("QWEN_TTS_PHRASE_REQUEST_TIMEOUT_SECONDS", "150"))
-QWEN_TTS_SPLICE_REQUEST_TIMEOUT_SECONDS = int(os.getenv("QWEN_TTS_SPLICE_REQUEST_TIMEOUT_SECONDS", "150"))
+# Raised from 150 for best-of-N: a bad/long uncached body can take several
+# minutes (greeting best-of-N + adaptive body regeneration + first-request
+# Whisper load). Bodies are S3-cached, so this cost is paid once per unique body;
+# a too-short timeout would spuriously fail exactly the hard cases best-of-N fixes.
+QWEN_TTS_PHRASE_REQUEST_TIMEOUT_SECONDS = int(os.getenv("QWEN_TTS_PHRASE_REQUEST_TIMEOUT_SECONDS", "600"))
+QWEN_TTS_SPLICE_REQUEST_TIMEOUT_SECONDS = int(os.getenv("QWEN_TTS_SPLICE_REQUEST_TIMEOUT_SECONDS", "600"))
 QWEN_TTS_STATUS_TIMEOUT_SECONDS = int(os.getenv("QWEN_TTS_STATUS_TIMEOUT_SECONDS", "30"))
 PHRASE_SPLICE_PAUSE_MS = int(os.getenv("PHRASE_SPLICE_PAUSE_MS", "220"))
 PHRASE_SPLICE_CROSSFADE_MS = int(os.getenv("PHRASE_SPLICE_CROSSFADE_MS", "10"))
