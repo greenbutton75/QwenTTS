@@ -13,7 +13,45 @@ needs validation on the GPU box.
   (`candidate_pool.py`), duration penalty in composite score, optional ASR
   hard-gate, app.py splice wiring. **Not** done: per-voice similarity threshold
   (spec 2.4) and batched candidate generation (sequential only) — deferred.
-- **Phase 3 — not started.** `reference_validator.py`, body best-of-N, body ASR gate.
+- **Phase 3 (body) — DONE, validated on the RTX 4090 box.** Adaptive body
+  best-of-N (`candidate_pool.generate_body_candidates`), trailing-silence trim on
+  the merged phrase, and quoted-greeting routing. `reference_validator.py` and a
+  separate body ASR hard-gate are still not started (deferred).
+
+## Validated on a diverse prod-phrase set (7 phrases, 6 voices)
+
+These had errored on the original service. Before vs after greeting + body
+best-of-N + trailing trim:
+
+- carter (82938, elderly male): 103s / WER 0.97 "Thank you for watching" -> 29.9s / WER 0.0 (body regenerated 3x).
+- jodi (same voice/body): garbage greedy body again -> 29.8s / WER 0.0 (regenerated).
+- floyd: WER 0.79 -> 0.034.
+- jacque: ~4.8s trailing silence -> trimmed (trailing_removed_ms ~4799), body content fine (WER 0.169 is spelled-out phone-number formatting only).
+- riley: original text is curly-quoted ("Hi Riley...) which blocked the greeting split and forced the unprotected full render; quote-strip now routes it to splice -> WER 0.0.
+- penny, h: good.
+
+## Residual gap (documented, not yet built)
+
+The **full-phrase render path** (`server/worker.py::_handle_phrase`, used only
+for genuinely non-splittable text with no "Hi/Hello Name") still uses the older
+greeting-probe + body-quality-retry protections, not the new ASR best-of-N.
+After the quote-strip fix this path is rarely hit for outbound greetings. Follow-up:
+generalize best-of-N + trailing trim to that path if needed.
+
+## Rollout flags (set in /etc/qwentts.env, then restart API + worker)
+
+```
+GREETING_BEST_OF_N_ENABLED=true
+BODY_BEST_OF_N_ENABLED=true
+# defaults already on / safe:
+# SPLICE_TRAILING_SILENCE_TRIM_ENABLED=true
+# GREETING_ASR_CHECK=true   (scoring only; GREETING_ASR_REQUIRE_PASS stays false)
+```
+
+Quote-stripping in `_split_greeting_body` is always-on code (no flag). Cost note:
+a bad body regenerates up to `BODY_BEST_OF_N_MAX_COUNT` (3) times; bodies are
+S3-cached so a shared body pays this once. Latency rises on bad draws; quality
+is the priority per product.
 
 ## Root-cause finding (from GPU validation)
 
