@@ -7,6 +7,8 @@ import re
 from .cache_utils import prompt_fingerprint
 from .config import LOG_BACKUPS, LOG_DIR, LOG_MAX_BYTES
 from .config import (
+    ASR_DIAGNOSTIC_MODE,
+    BODY_ASR_DIAGNOSTIC_MODE,
     GREETING_ONSET_ARTIFACT_REQUIRE_PASS,
     GREETING_FULL_PHRASE_MAX_ATTEMPTS,
     GREETING_SPEAKER_SIMILARITY_REQUIRE_PASS,
@@ -306,6 +308,10 @@ class Worker:
                     wav, sr = generate_voice(text, voice_prompt)
                     wav, sr, output_trim = clean_output_audio_preserve_tail(wav, sr)
 
+            diag_fields: Dict[str, Any] = {}
+            if ASR_DIAGNOSTIC_MODE or BODY_ASR_DIAGNOSTIC_MODE:
+                diag_fields = self._phrase_quality_diagnostics(text, wav, sr, prompt_data)
+
             with timed_operation(self.timing_logger, "api.worker.phrase.persist", support_id=support_id, voice_id=voice_id, phrase_id=phrase_id):
                 tmp_path = write_wav_temp(wav, sr)
                 upload_file(phrase_paths["audio"], tmp_path, "audio/wav")
@@ -338,6 +344,7 @@ class Worker:
                     "greeting_passed": bool(greeting_quality.get("greeting_passed", greeting_quality.get("start_passed", 1))),
                     "output_trim": output_trim,
                     "updated_at": int(time.time()),
+                    **diag_fields,
                 }
                 write_json(phrase_paths["phrase_json"], phrase_json)
 
@@ -345,6 +352,30 @@ class Worker:
                 os.remove(tmp_path)
             except Exception:
                 pass
+
+    def _phrase_quality_diagnostics(self, text, wav, sr, prompt_data) -> Dict[str, Any]:
+        """ASR/quality diagnostics for the full-phrase path (no rejection).
+
+        Failures here must never break generation -- diagnostics are best-effort.
+        """
+        from .quality import evaluate_candidate, diagnostic_phrase_fields
+
+        try:
+            with timed_operation(self.timing_logger, "api.worker.phrase.asr_diagnostic", text_chars=len(text or "")):
+                report = evaluate_candidate(
+                    wav=wav,
+                    sr=sr,
+                    text=text,
+                    reference_embedding=prompt_data["ref_spk_embedding"],
+                    target_text=text,
+                    ref_text=prompt_data.get("ref_text"),
+                    is_greeting=False,
+                    do_asr=True,
+                )
+            return diagnostic_phrase_fields(report, gate_decision="skipped")
+        except Exception as exc:
+            self.logger.warning("phrase ASR diagnostic failed: %s", exc)
+            return {}
 
     def _update_status_on_failure(
         self, task_type: str, payload: Dict[str, Any], error: str, attempts: int

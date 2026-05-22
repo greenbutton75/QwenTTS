@@ -102,6 +102,68 @@ OUTPUT_AUDIO_TRIM_MAX_TRAILING_MS = _get_env_int("OUTPUT_AUDIO_TRIM_MAX_TRAILING
 OUTPUT_AUDIO_MAX_INTERNAL_SILENCE_MS = _get_env_int("OUTPUT_AUDIO_MAX_INTERNAL_SILENCE_MS", 600)
 OUTPUT_AUDIO_TRIM_ALGORITHM_VERSION = os.getenv("OUTPUT_AUDIO_TRIM_ALGORITHM_VERSION", "rms_flatness_pause_compact_v4")
 
+# --- Quality Gate (Phase 1): ASR diagnostics + composite score ---
+# All flags default OFF / diagnostic-only so a fresh deploy behaves exactly
+# like the pre-Phase-1 service.
+
+# ASR / Whisper
+ASR_DIAGNOSTIC_MODE = _get_env_bool("ASR_DIAGNOSTIC_MODE", False)
+BODY_ASR_DIAGNOSTIC_MODE = _get_env_bool("BODY_ASR_DIAGNOSTIC_MODE", False)
+ASR_MODEL_SIZE = os.getenv("ASR_MODEL_SIZE", "large-v3")
+ASR_COMPUTE_TYPE = os.getenv("ASR_COMPUTE_TYPE", "float16")
+ASR_BEAM_SIZE = _get_env_int("ASR_BEAM_SIZE", 5)
+ASR_NO_SPEECH_THRESHOLD = _get_env_float("ASR_NO_SPEECH_THRESHOLD", 0.6)
+
+# Greeting ASR gate thresholds (used to compute asr_passed; enforcement is Phase 2)
+GREETING_ASR_MAX_WER = _get_env_float("GREETING_ASR_MAX_WER", 0.20)
+GREETING_ASR_PREFIX_EXTRA_REJECT = _get_env_bool("GREETING_ASR_PREFIX_EXTRA_REJECT", True)
+GREETING_ASR_SUFFIX_CLIPPED_REJECT = _get_env_bool("GREETING_ASR_SUFFIX_CLIPPED_REJECT", True)
+GREETING_ASR_REFERENCE_LEAK_REJECT = _get_env_bool("GREETING_ASR_REFERENCE_LEAK_REJECT", True)
+
+# Composite score weights (TODO: calibrate after baseline measurement)
+SCORE_W_SIM = _get_env_float("SCORE_W_SIM", 1.0)
+SCORE_W_ASR = _get_env_float("SCORE_W_ASR", 1.5)
+SCORE_P_PREFIX = _get_env_float("SCORE_P_PREFIX", 0.50)
+SCORE_P_SUFFIX = _get_env_float("SCORE_P_SUFFIX", 0.50)
+SCORE_P_REFLEAK = _get_env_float("SCORE_P_REFLEAK", 1.00)
+SCORE_P_ONSET = _get_env_float("SCORE_P_ONSET", 0.30)
+SCORE_P_PREROLL = _get_env_float("SCORE_P_PREROLL", 0.30)
+SCORE_P_ENDING = _get_env_float("SCORE_P_ENDING", 0.30)
+SCORE_P_BODY_START = _get_env_float("SCORE_P_BODY_START", 0.30)
+SCORE_P_BODY_TAIL = _get_env_float("SCORE_P_BODY_TAIL", 0.30)
+SCORE_P_BODY_CLIPPED = _get_env_float("SCORE_P_BODY_CLIPPED", 0.30)
+
+
+def asr_config() -> dict:
+    return {
+        "diagnostic_mode": ASR_DIAGNOSTIC_MODE,
+        "body_diagnostic_mode": BODY_ASR_DIAGNOSTIC_MODE,
+        "model_size": ASR_MODEL_SIZE,
+        "compute_type": ASR_COMPUTE_TYPE,
+        "beam_size": ASR_BEAM_SIZE,
+        "no_speech_threshold": ASR_NO_SPEECH_THRESHOLD,
+        "max_wer": GREETING_ASR_MAX_WER,
+        "prefix_extra_reject": GREETING_ASR_PREFIX_EXTRA_REJECT,
+        "suffix_clipped_reject": GREETING_ASR_SUFFIX_CLIPPED_REJECT,
+        "reference_leak_reject": GREETING_ASR_REFERENCE_LEAK_REJECT,
+    }
+
+
+def score_weights() -> dict:
+    return {
+        "w_sim": SCORE_W_SIM,
+        "w_asr": SCORE_W_ASR,
+        "p_prefix": SCORE_P_PREFIX,
+        "p_suffix": SCORE_P_SUFFIX,
+        "p_refleak": SCORE_P_REFLEAK,
+        "p_onset": SCORE_P_ONSET,
+        "p_preroll": SCORE_P_PREROLL,
+        "p_ending": SCORE_P_ENDING,
+        "p_body_start": SCORE_P_BODY_START,
+        "p_body_tail": SCORE_P_BODY_TAIL,
+        "p_body_clipped": SCORE_P_BODY_CLIPPED,
+    }
+
 
 def voice_clone_generate_config() -> dict:
     config = {

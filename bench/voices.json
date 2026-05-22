@@ -1,0 +1,10 @@
+{
+  "_comment": "Template. Replace support_id/voice_id with REAL production profiles before running. The spec calls for ~15 voices spanning reference quality (clean/noisy, male/female, short/long reference). Profiles must already exist in S3 (prompt.pt present).",
+  "voices": [
+    {"support_id": "REPLACE_ME", "voice_id": "REPLACE_ME", "tag": "clean_male_1"},
+    {"support_id": "REPLACE_ME", "voice_id": "REPLACE_ME", "tag": "clean_female_1"},
+    {"support_id": "REPLACE_ME", "voice_id": "REPLACE_ME", "tag": "noisy_male_1"},
+    {"support_id": "REPLACE_ME", "voice_id": "REPLACE_ME", "tag": "noisy_female_1"},
+    {"support_id": "REPLACE_ME", "voice_id": "REPLACE_ME", "tag": "short_reference_1"}
+  ]
+}

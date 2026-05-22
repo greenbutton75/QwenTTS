@@ -1,0 +1,18 @@
+{
+  "_comment": "Benchmark inputs for the splice path. The driver generates voice x greeting x body x runs. greeting.category drives per-category fail-rate buckets; stress greetings probe edge cases (long names, non-ascii names, punctuation, repeats).",
+  "greetings": [
+    {"id": "g_dennis", "category": "normal", "text": "Hi, Dennis."},
+    {"id": "g_sarah", "category": "normal", "text": "Hi, Sarah."},
+    {"id": "g_mike", "category": "normal", "text": "Hello, Mike."},
+    {"id": "g_emma", "category": "normal", "text": "Hi, Emma."},
+    {"id": "g_long", "category": "stress", "text": "Hi, Aleksandra."},
+    {"id": "g_short", "category": "stress", "text": "Hi, Al."},
+    {"id": "g_nonascii", "category": "stress", "text": "Hi, Czeslaw."},
+    {"id": "g_repeat", "category": "stress", "text": "Hi, Anna Anna."}
+  ],
+  "bodies": [
+    {"id": "b_intro", "text": "This is Alex, Director of Customer Support from Rixtrema."},
+    {"id": "b_followup", "text": "I hope your day is going well. I would like to get a few minutes of your time to learn more about your business and your retirement plan. Do you have 15-20 minutes over the next week or two?"},
+    {"id": "b_short", "text": "I am calling with a quick follow up about your retirement plan."}
+  ]
+}

@@ -13,6 +13,7 @@ from qwen_tts import VoiceClonePromptItem
 from .config import ADMIN_PASSWORD, ADMIN_USER, LANGUAGE, MODEL_SIZE, S3_PREFIX, SQLITE_PATH
 from .config import voice_clone_generate_config
 from .config import (
+    ASR_DIAGNOSTIC_MODE,
     BODY_QUALITY_REQUIRE_PASS,
     GREETING_ONSET_ARTIFACT_REQUIRE_PASS,
     GREETING_SPEAKER_SIMILARITY_CHECK,
@@ -227,6 +228,31 @@ def _load_or_generate_body_wav(
         return body_wav, int(sr_body), body_hash, body_cache_hit
 
 
+def _phrase_quality_diagnostics(text, wav, sr, prompt_data):
+    """ASR/quality diagnostics for a final phrase (no rejection, best-effort).
+
+    Returns flat phrase_json fields, or None if diagnostics could not run.
+    """
+    from .quality import evaluate_candidate, diagnostic_phrase_fields
+
+    try:
+        with timed_operation(timing_logger, "api.splice_synthesize.asr_diagnostic", text_chars=len(text or "")):
+            report = evaluate_candidate(
+                wav=wav,
+                sr=sr,
+                text=text,
+                reference_embedding=prompt_data["ref_spk_embedding"],
+                target_text=text,
+                ref_text=prompt_data.get("ref_text"),
+                is_greeting=False,
+                do_asr=True,
+            )
+        return diagnostic_phrase_fields(report, gate_decision="skipped")
+    except Exception as exc:
+        logger.warning("splice ASR diagnostic failed: %s", exc)
+        return None
+
+
 def _synthesize_spliced_phrase(
     support_id: str,
     voice_id: str,
@@ -396,6 +422,16 @@ def _synthesize_spliced_phrase(
                 target_lufs=target_lufs,
             )
             merged_wav, merged_sr, output_trim = clean_output_audio_for_spliced_phrase(merged_wav, int(sr_greeting))
+
+        quality_diag = None
+        if ASR_DIAGNOSTIC_MODE:
+            quality_diag = _phrase_quality_diagnostics(
+                text=f"{greeting} {body}".strip(),
+                wav=merged_wav,
+                sr=int(merged_sr),
+                prompt_data=prompt_data,
+            )
+
         span.set(
             body_hash=body_hash,
             body_cache_hit=body_cache_hit,
@@ -416,6 +452,7 @@ def _synthesize_spliced_phrase(
             greeting_similarity_passed,
             greeting_quality,
             output_trim,
+            quality_diag,
         )
 
 
@@ -654,6 +691,7 @@ def splice_test_phrase(req: SpliceTestRequest) -> Response:
                 greeting_similarity_passed,
                 greeting_quality,
                 output_trim,
+                _quality_diag,
             ) = _synthesize_spliced_phrase(
                 support_id=req.support_id,
                 voice_id=req.voice_id,
@@ -751,6 +789,7 @@ def create_phrase_splice_prod(req: CreateSplicePhraseRequest) -> CreatePhraseRes
                 greeting_similarity_passed,
                 greeting_quality,
                 output_trim,
+                quality_diag,
             ) = _synthesize_spliced_phrase(
                 support_id=req.support_id,
                 voice_id=req.voice_id,
@@ -802,6 +841,7 @@ def create_phrase_splice_prod(req: CreateSplicePhraseRequest) -> CreatePhraseRes
                         "greeting_passed": bool(greeting_quality.get("greeting_passed", greeting_quality.get("start_passed", 1))),
                         "output_trim": output_trim,
                         "updated_at": int(time.time()),
+                        **(quality_diag or {}),
                     },
                 )
         except Exception as exc:

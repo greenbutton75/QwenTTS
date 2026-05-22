@@ -402,5 +402,80 @@ class ServerCacheLogicTests(unittest.TestCase):
         clean_mock.assert_called_once()
 
 
+class PhraseAsrDiagnosticModeTests(unittest.TestCase):
+    """Phase 1 quality gate: ASR diagnostics are flag-gated and never reject."""
+
+    def _payload(self):
+        return {
+            "support_id": "support-1",
+            "voice_id": "voice-1",
+            "phrase_id": "phrase-diag",
+            "text": "Hi Dennis. I would like to learn more about your business.",
+        }
+
+    def _prompt_data(self):
+        return {
+            "ref_code": np.array([[1, 2, 3]], dtype=np.int16),
+            "ref_spk_embedding": np.array([0.1, 0.2], dtype=np.float32),
+            "x_vector_only_mode": False,
+            "icl_mode": True,
+            "ref_text": "reference text",
+        }
+
+    def _run(self, diagnostic_mode: bool):
+        worker = server_worker.Worker(db=MagicMock(), logger=MagicMock())
+        captured = {}
+
+        def _capture_write_json(key, value):
+            if key.endswith(".json"):
+                captured["phrase_json"] = value
+
+        with patch.object(server_worker, "download_torch", return_value=self._prompt_data()), \
+             patch.object(server_worker, "generate_voice", return_value=(np.zeros(8, dtype=np.float32), 24000)), \
+             patch.object(server_worker, "generate_voice_with_similarity_retry", return_value=(np.zeros(8, dtype=np.float32), 24000, 0.91, 1, True, {"start_passed": 1, "greeting_passed": 1})), \
+             patch.object(server_worker, "clean_output_audio_preserve_tail", return_value=(np.zeros(8, dtype=np.float32), 24000, {"trimmed": 0, "leading_ms": 0, "trailing_ms": 0, "original_ms": 0, "cleaned_ms": 0})), \
+             patch.object(server_worker, "write_wav_temp", return_value="tmp.wav"), \
+             patch.object(server_worker, "upload_file"), \
+             patch.object(server_worker, "create_presigned_url", return_value="https://example.invalid/audio.wav"), \
+             patch.object(server_worker, "write_json", side_effect=_capture_write_json), \
+             patch.object(server_worker.os, "remove"), \
+             patch.object(server_worker, "ASR_DIAGNOSTIC_MODE", diagnostic_mode), \
+             patch.object(server_worker, "BODY_ASR_DIAGNOSTIC_MODE", False):
+            worker._handle_phrase(self._payload())
+        return captured["phrase_json"]
+
+    def test_diagnostic_off_adds_no_asr_fields(self) -> None:
+        phrase_json = self._run(diagnostic_mode=False)
+        self.assertNotIn("schema_version", phrase_json)
+        self.assertNotIn("asr_wer", phrase_json)
+        self.assertNotIn("composite_score", phrase_json)
+
+    def test_diagnostic_on_adds_asr_fields(self) -> None:
+        diag = {
+            "schema_version": 2,
+            "asr_transcript": "hi dennis i would like to learn more about your business",
+            "asr_wer": 0.0,
+            "composite_score": 2.3,
+            "quality_gate_decision": "skipped",
+        }
+        with patch("server.quality.evaluate_candidate", return_value=object()) as eval_mock, \
+             patch("server.quality.diagnostic_phrase_fields", return_value=diag):
+            phrase_json = self._run(diagnostic_mode=True)
+        eval_mock.assert_called_once()
+        self.assertEqual(phrase_json["schema_version"], 2)
+        self.assertEqual(phrase_json["asr_wer"], 0.0)
+        self.assertEqual(phrase_json["quality_gate_decision"], "skipped")
+        # Existing fields are preserved alongside the new diagnostic fields.
+        self.assertEqual(phrase_json["status"], "done")
+        self.assertEqual(phrase_json["phrase_id"], "phrase-diag")
+
+    def test_diagnostic_failure_does_not_break_generation(self) -> None:
+        with patch("server.quality.evaluate_candidate", side_effect=RuntimeError("whisper boom")):
+            phrase_json = self._run(diagnostic_mode=True)
+        # Generation still succeeds; diagnostics silently degrade to no fields.
+        self.assertEqual(phrase_json["status"], "done")
+        self.assertNotIn("schema_version", phrase_json)
+
+
 if __name__ == "__main__":
     unittest.main()
