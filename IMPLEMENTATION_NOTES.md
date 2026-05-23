@@ -168,3 +168,42 @@ With both off, behavior is identical to pre-Phase-1.
 - **Name normalization** (spec open question 2): start with Levenshtein ≤ 1
   fuzzy match (already implemented in `asr.py`); build a replacement table from
   real benchmark misses if needed.
+
+## Pending calm-window deploy (branch `prep-adaptive-greeting`)
+
+Prepared and unit-tested offline; NOT on `main`, NOT deployed. Roll out together
+during a low-traffic window:
+
+- **Adaptive greeting best-of-N** — keep the greedy greeting when it is already
+  good; only spend the extra candidates on bad greetings. Cuts common-case
+  greeting cost 4→1 (throughput) with no quality loss. This addresses the slow
+  throughput observed when best-of-N ran 4 greeting renders on every phrase.
+- **Robust supervisors** (`run_api.sh`, `run_worker.sh`) — removed `set -e`
+  (root cause of the supervisor deaths during the rollout incident: a non-zero
+  child exit killed the supervisor instead of restarting) + added an
+  adopt-don't-duplicate guard.
+
+### Deploy procedure (do this, not ad-hoc restarts)
+1. Merge `prep-adaptive-greeting` → `main`, push.
+2. On box: `git checkout main && git pull` (or just let a watchdog recreate,
+   which clones `main` fresh and uses the fixed supervisors via onstart).
+3. Restart cleanly: prefer relaunching the FIXED supervisor scripts; they adopt
+   a running child and restart it on exit.
+
+### Incident lessons (rollout day) — avoid repeating
+- `set -e` in the while-true supervisors killed them on any non-zero child exit.
+- `pkill -f <pattern>` self-matches the SSH command line that CONTAINS the
+  pattern (incl. the literal `./scripts/run_api.sh` in a launch command). Use
+  `kill <PID>` from a captured PID instead.
+- uvicorn handles SIGTERM gracefully and WAITS for in-flight generations before
+  exiting — a SIGTERM mid-generation leaves it in shutdown limbo (and once hung
+  on a CUDA call, only the syscall returning frees it). Restart when idle, or
+  use the supervisor's adopt logic; avoid SIGTERM mid-request.
+
+### Deferred option B — 3-part splice for double-personalized phrases
+Phrases with the lead name at BOTH ends (e.g. `Hi Sara, ... Again, Sara—`) make
+the body unique per lead, so the S3 body cache never reuses and the long body is
+regenerated every time. Best fix without quality loss: keep personalization only
+in the greeting (upstream/chat-ai). TTS-side alternative (deferred): split into
+`greeting + shared body + signoff` so the long body is cached once and only the
+short personalized ends are generated per lead.
