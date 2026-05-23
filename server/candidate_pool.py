@@ -21,6 +21,7 @@ from .config import (
     BODY_ASR_MAX_WER,
     BODY_BEST_OF_N_MAX_COUNT,
     GREETING_ASR_CHECK,
+    GREETING_ASR_MAX_WER,
     GREETING_SPEAKER_SIMILARITY_THRESHOLD,
     VOICE_CLONE_MAX_NEW_TOKENS,
     VOICE_CLONE_NON_STREAMING_MODE,
@@ -104,7 +105,15 @@ def generate_greeting_candidates(
     n: int = 4,
     similarity_threshold: Optional[float] = None,
     do_asr: Optional[bool] = None,
+    adaptive: bool = False,
 ) -> List[Candidate]:
+    """Generate greeting candidates and let the caller pick the best.
+
+    With ``adaptive=True`` the greedy render is generated first and kept alone if
+    it is already good (similarity ok, no greeting artifact, not over-long, ASR
+    clean). Only a bad greedy triggers the extra sampled renders. This keeps the
+    common case at one generation while still protecting the bad cases.
+    """
     target = target_text if target_text is not None else text
     do_asr = GREETING_ASR_CHECK if do_asr is None else do_asr
     threshold = (
@@ -133,7 +142,28 @@ def generate_greeting_candidates(
         candidates.append(
             Candidate(spec=spec, wav=wav, sr=sr, generate_latency_ms=gen_ms, report=report, score=report.composite_score)
         )
+        if adaptive and len(candidates) == 1 and _greeting_is_good(report):
+            break
     return candidates
+
+
+def _greeting_is_good(report: "quality.QualityReport") -> bool:
+    """Whether a greedy greeting is good enough to keep without best-of-N:
+    timbre ok, no onset/preroll/ending artifact, not over-long (runaway), and
+    ASR clean (right words, name present, no leak)."""
+    if not report.similarity_passed:
+        return False
+    if report.onset_artifact or report.preroll_artifact or report.ending_artifact:
+        return False
+    if report.duration_artifact:
+        return False
+    asr = report.asr
+    if asr is not None:
+        if asr.wer > GREETING_ASR_MAX_WER:
+            return False
+        if asr.has_prefix_extra or asr.has_suffix_clipped or asr.has_reference_leak:
+            return False
+    return True
 
 
 def _body_specs(n: int) -> List[CandidateSpec]:

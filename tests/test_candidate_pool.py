@@ -87,6 +87,19 @@ def _body_report(wer, sim_passed=True, artifact=False, score=None):
     return r
 
 
+def _greeting_report(wer=0.0, sim_passed=True, onset=False, preroll=False, ending=False, duration=False):
+    asr_rep = asr.ASRReport(
+        transcript_raw="hi sara", transcript_normalized="hi sara", target_normalized="hi sara",
+        wer=wer, cer=wer, has_prefix_extra=False, has_suffix_clipped=False, has_reference_leak=False,
+    )
+    r = quality.QualityReport(
+        similarity=0.9, similarity_passed=sim_passed, asr=asr_rep, asr_passed=(wer <= 0.2),
+        onset_artifact=onset, preroll_artifact=preroll, ending_artifact=ending, duration_artifact=duration,
+    )
+    r.composite_score = 0.9 + 1.5 * (1 - wer)
+    return r
+
+
 class SelectBestTests(unittest.TestCase):
     def _cand(self, label, score, passed):
         return cp.Candidate(
@@ -195,6 +208,55 @@ class BodyBestOfNTests(unittest.TestCase):
         self.assertFalse(cp._body_is_good(_body_report(wer=0.1, artifact=True), 0.35))
         self.assertFalse(cp._body_is_good(_body_report(wer=0.1, sim_passed=False), 0.35))
 
+    def test_greeting_is_good_helper(self) -> None:
+        self.assertTrue(cp._greeting_is_good(_greeting_report(wer=0.0)))
+        self.assertFalse(cp._greeting_is_good(_greeting_report(onset=True)))
+        self.assertFalse(cp._greeting_is_good(_greeting_report(preroll=True)))
+        self.assertFalse(cp._greeting_is_good(_greeting_report(duration=True)))  # runaway
+        self.assertFalse(cp._greeting_is_good(_greeting_report(wer=0.9)))
+        self.assertFalse(cp._greeting_is_good(_greeting_report(sim_passed=False)))
+
+
+class GreetingAdaptiveTests(unittest.TestCase):
+    def _patches(self, eval_side_effect):
+        return (
+            patch.object(cp.tts, "generate_voice", return_value=(np.zeros(8, dtype=np.float32), 24000)),
+            patch.object(cp.quality, "evaluate_candidate", side_effect=eval_side_effect),
+        )
+
+    def test_adaptive_keeps_good_greedy_single_render(self) -> None:
+        p1, p2 = self._patches(lambda **k: _greeting_report(wer=0.0))
+        with p1 as gen, p2:
+            cands = cp.generate_greeting_candidates(
+                text="Hi Sara,", voice_prompt=[object()],
+                reference_embedding=np.ones(4, dtype=np.float32), n=4, adaptive=True,
+            )
+        self.assertEqual(len(cands), 1)
+        self.assertEqual(gen.call_count, 1)
+
+    def test_adaptive_regenerates_when_greedy_bad(self) -> None:
+        reports = iter([_greeting_report(duration=True), _greeting_report(wer=0.0), _greeting_report(wer=0.0), _greeting_report(wer=0.0)])
+        p1, p2 = self._patches(lambda **k: next(reports))
+        with p1 as gen, p2:
+            cands = cp.generate_greeting_candidates(
+                text="Hi Sara,", voice_prompt=[object()],
+                reference_embedding=np.ones(4, dtype=np.float32), n=4, adaptive=True,
+            )
+        self.assertGreater(len(cands), 1)
+        self.assertGreater(gen.call_count, 1)
+
+    def test_non_adaptive_generates_all(self) -> None:
+        p1, p2 = self._patches(lambda **k: _greeting_report(wer=0.0))
+        with p1 as gen, p2:
+            cands = cp.generate_greeting_candidates(
+                text="Hi Sara,", voice_prompt=[object()],
+                reference_embedding=np.ones(4, dtype=np.float32), n=4, adaptive=False,
+            )
+        self.assertEqual(len(cands), 4)
+        self.assertEqual(gen.call_count, 4)
+
+
+class BodyAcceptableTests(unittest.TestCase):
     def test_body_acceptable_uses_lenient_wer_not_all_checks(self) -> None:
         # WER 0.30 (spelled-out phone numbers): all_checks_passed would be False
         # (strict 0.20 greeting bar) but the body is acceptable for shipping.

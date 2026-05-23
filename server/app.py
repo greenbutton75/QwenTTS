@@ -347,6 +347,7 @@ def _synthesize_spliced_phrase(
                         ref_text=prompt_data.get("ref_text"),
                         n=GREETING_BEST_OF_N_COUNT,
                         similarity_threshold=GREETING_SPEAKER_SIMILARITY_THRESHOLD,
+                        adaptive=True,
                     )
                     best = select_best(candidates)
                     greeting_wav, sr_greeting = best.wav, int(best.sr)
