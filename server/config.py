@@ -77,7 +77,12 @@ GREETING_SPLICE_MAX_NEW_TOKENS = _get_env_int(
 )
 GREETING_SPEAKER_SIMILARITY_REQUIRE_PASS = _get_env_bool("GREETING_SPEAKER_SIMILARITY_REQUIRE_PASS", False)
 GREETING_ONSET_ARTIFACT_CHECK = _get_env_bool("GREETING_ONSET_ARTIFACT_CHECK", True)
-GREETING_ONSET_ARTIFACT_REQUIRE_PASS = _get_env_bool("GREETING_ONSET_ARTIFACT_REQUIRE_PASS", True)
+# Default relaxed to False under best-of-N: the greeting candidate selection
+# already picks the lowest-artifact render and the output cleanup trims leading
+# onset noise, so hard-failing here only forced a 422 -> fallback to the
+# unprotected full-phrase path. Detection still runs (diagnostics); it just no
+# longer rejects. Set the env var to true to restore hard-fail.
+GREETING_ONSET_ARTIFACT_REQUIRE_PASS = _get_env_bool("GREETING_ONSET_ARTIFACT_REQUIRE_PASS", False)
 GREETING_SPEAKER_SIMILARITY_RETRY_DO_SAMPLE = _get_env_bool("GREETING_SPEAKER_SIMILARITY_RETRY_DO_SAMPLE", True)
 GREETING_SPEAKER_SIMILARITY_RETRY_TEMPERATURE = _get_env_float("GREETING_SPEAKER_SIMILARITY_RETRY_TEMPERATURE", 0.3)
 GREETING_SPEAKER_SIMILARITY_RETRY_TOP_K = _get_env_int("GREETING_SPEAKER_SIMILARITY_RETRY_TOP_K", 8)
