@@ -173,6 +173,24 @@ def _wait_for_qwen_tts_ready(state: HealthState) -> None:
             time.sleep(max(1, QWEN_TTS_READY_POLL_INTERVAL))
 
 
+_FNAME_PLACEHOLDER_RE = re.compile(r"@FNAME", re.IGNORECASE)
+
+
+def _resolve_fname_placeholder(text: Any, params: Dict[str, Any]) -> Any:
+    # Upstream chat-ai sometimes ships the raw "@FNAME" placeholder in `text`
+    # instead of substituting the lead's first name. Without this fix the TTS
+    # literally pronounces "at fname". Replace using params["firstName"].
+    if not isinstance(text, str) or not _FNAME_PLACEHOLDER_RE.search(text):
+        return text
+    first_name = str(params.get("firstName") or params.get("first_name") or "").strip()
+    if not first_name:
+        logger.warning(
+            "text contains @FNAME placeholder but firstName is missing; leaving as-is"
+        )
+        return text
+    return _FNAME_PLACEHOLDER_RE.sub(first_name, text)
+
+
 def _normalize_body_for_grouping(text: str) -> str:
     value = text.strip().lower()
     value = value.replace("—", "-").replace("–", "-")
@@ -443,6 +461,7 @@ def process_phrases_batch(state: HealthState) -> None:
                 voice_id = params.get("voice_id")
                 phrase_id = params.get("phrase_id")
                 text = params.get("text")
+                text = _resolve_fname_placeholder(text, params)
                 if not support_id or not voice_id or not phrase_id or not text:
                     failed_task(task_id, error="missing support_id/voice_id/phrase_id/text")
                     state.inc_phrase_failed()
