@@ -15,13 +15,32 @@
 # limitations under the License.
 import sox
 import copy
+import numpy as np
 import torch
 import operator
 import onnxruntime
 
 import torch.nn as nn
 import torch.nn.functional as F
-import torchaudio.compliance.kaldi as kaldi
+
+# Fbank backend selection: prefer torchaudio.compliance.kaldi (Vast.ai cu121
+# torch 2.2.2 — its prebuilt wheel works). Fall back to kaldi_native_fbank
+# (pure C++, no torch ABI dependency) on hosts where torchaudio cannot load —
+# e.g. the DGX Spark / GB10 box, where NGC ships a custom torch alpha for
+# which no compatible torchaudio wheel exists.
+try:
+    import torchaudio.compliance.kaldi as _kaldi_torchaudio
+    _HAS_TORCHAUDIO_KALDI = True
+except (ImportError, OSError):
+    _kaldi_torchaudio = None
+    _HAS_TORCHAUDIO_KALDI = False
+
+try:
+    import kaldi_native_fbank as _knf
+    _HAS_KNF = True
+except ImportError:
+    _knf = None
+    _HAS_KNF = False
 
 from librosa.filters import mel as librosa_mel_fn
 from itertools import accumulate
@@ -137,21 +156,43 @@ class XVectorExtractor(nn.Module):
             sampling_rate=16000
         )
 
+        self._knf_opts = None
+        if not _HAS_TORCHAUDIO_KALDI:
+            if not _HAS_KNF:
+                raise RuntimeError(
+                    "Neither torchaudio.compliance.kaldi nor kaldi_native_fbank "
+                    "is available; install one of them to compute X-Vector fbank features."
+                )
+            self._knf_opts = _knf.FbankOptions()
+            self._knf_opts.frame_opts.samp_freq = 16000
+            self._knf_opts.frame_opts.dither = 0.0
+            self._knf_opts.mel_opts.num_bins = 80
+
+    def _extract_fbank(self, audio_np_1d):
+        if _HAS_TORCHAUDIO_KALDI:
+            wav = torch.from_numpy(audio_np_1d).unsqueeze(0)
+            return _kaldi_torchaudio.fbank(
+                wav, num_mel_bins=80, dither=0, sample_frequency=16000,
+            )
+        fbank = _knf.OnlineFbank(self._knf_opts)
+        fbank.accept_waveform(16000, audio_np_1d)
+        fbank.input_finished()
+        return torch.from_numpy(
+            np.stack([fbank.get_frame(i) for i in range(fbank.num_frames_ready)])
+        ).float()
+
     def extract_code(self, audio):
         with torch.no_grad():
-            norm_audio = self.sox_norm(audio)
+            norm_audio_np = self.sox_norm(audio).astype(np.float32)
 
-            norm_audio = torch.from_numpy(copy.deepcopy(norm_audio)).unsqueeze(0)
-            feat = kaldi.fbank(norm_audio,
-                            num_mel_bins=80,
-                            dither=0,
-                            sample_frequency=16000)
+            feat = self._extract_fbank(norm_audio_np)
             feat = feat - feat.mean(dim=0, keepdim=True)
             norm_embedding = self.ort_session.run(None, {self.ort_session.get_inputs()[0].name: feat.unsqueeze(dim=0).cpu().numpy()})[0].flatten()
             norm_embedding = F.normalize(torch.from_numpy(norm_embedding), dim=0)
-            
+
+            norm_audio = torch.from_numpy(norm_audio_np).unsqueeze(0)
             ref_mel = self.mel_ext.extract(audio=norm_audio)
-        
+
         return norm_embedding.numpy(), ref_mel.permute(0,2,1).squeeze(0).numpy()
     
     def sox_norm(self, audio):
