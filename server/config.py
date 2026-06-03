@@ -116,6 +116,10 @@ ASR_DIAGNOSTIC_MODE = _get_env_bool("ASR_DIAGNOSTIC_MODE", False)
 BODY_ASR_DIAGNOSTIC_MODE = _get_env_bool("BODY_ASR_DIAGNOSTIC_MODE", False)
 ASR_MODEL_SIZE = os.getenv("ASR_MODEL_SIZE", "large-v3")
 ASR_COMPUTE_TYPE = os.getenv("ASR_COMPUTE_TYPE", "float16")
+# auto | cuda | cpu. "auto" uses CUDA when torch sees a GPU. Override to "cpu"
+# on hosts where ctranslate2 lacks CUDA support (e.g. arm64 PyPI wheels), so
+# Whisper falls back to int8 CPU instead of crashing on first transcribe.
+ASR_DEVICE = os.getenv("ASR_DEVICE", "auto")
 ASR_BEAM_SIZE = _get_env_int("ASR_BEAM_SIZE", 5)
 ASR_NO_SPEECH_THRESHOLD = _get_env_float("ASR_NO_SPEECH_THRESHOLD", 0.6)
 

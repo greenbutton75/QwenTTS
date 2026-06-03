@@ -229,7 +229,12 @@ def _get_asr_model():
             from faster_whisper import WhisperModel
             import torch
 
-            device = "cuda" if torch.cuda.is_available() else "cpu"
+            from .config import ASR_DEVICE
+
+            if ASR_DEVICE == "auto":
+                device = "cuda" if torch.cuda.is_available() else "cpu"
+            else:
+                device = ASR_DEVICE
             compute_type = ASR_COMPUTE_TYPE if device == "cuda" else "int8"
             logger.info(
                 "Loading Whisper model size=%s device=%s compute_type=%s",
