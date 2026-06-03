@@ -210,7 +210,11 @@ The env has three parts: AWS/S3 creds, prod secrets (TASK_BASE_URL, USER_TOKEN, 
 Key DGX-specific values:
 
 ```
-FINGERPRINT=dgx-spark-001          # unique identifier so task_api can route per-worker
+# IMPORTANT: copy USER_TOKEN, SYSTEM_TOKEN, and FINGERPRINT verbatim from the prod
+# secrets file (s3://rixtrema-qwentts/secrets/qwentts.env). The Vast.ai worker and
+# the DGX worker share the SAME identity — task_api does not deduplicate by
+# FINGERPRINT, so two listeners with different fingerprints would race for the
+# same NEW task. Only one task_worker may run at a time; see "Cutover" below.
 ASR_DEVICE=cpu                     # ctranslate2 wheel here is CPU-only
 HF_HUB_OFFLINE=1                   # never call HF Hub at runtime (caches already populated)
 TRANSFORMERS_OFFLINE=1             # same intent, transformers side
@@ -381,20 +385,117 @@ S3 layout produced by both:
    verified**. The DGX side is `systemctl stop qwentts` / `systemctl start qwentts` to
    give/take the GPU; the llama side has its own start script.
 
-## Cutover plan (not done yet — see Phase 9 todo)
+## Cutover: handing the prod queue from Vast.ai to DGX
 
-To make DGX a prod worker that picks up real tasks from `rixtrema.net/api/async_task_manager`:
+### Ground rules
 
-1. Write a second systemd unit `qwentts-worker.service` that runs the same container with
-   command `python -m task_worker.main`. It polls task_api with our `USER_TOKEN`,
-   `SYSTEM_TOKEN`, `FINGERPRINT=dgx-spark-001`.
-2. **Open question**: does task_api dispatch by FINGERPRINT? If yes — DGX worker and Vast
-   worker can run in parallel, splitting load by fingerprint identity. If no — only one
-   worker can run at a time; we must stop Vast before starting DGX worker.
-3. Coexistence with llama-server must be settled (see surprise #6).
+- `task_api` does NOT route or dedupe by `FINGERPRINT`. Both workers see the same `NEW`
+  task list and there is a race between `list_tasks` and `update_progress` —
+  if Vast and DGX both run, both will pick the same task and process it twice (best case
+  wasted GPU, worst case the second one fails with a state-conflict and the lead gets a
+  bad WAV).
+- Therefore: **exactly one task_worker may run at a time, anywhere in the world**.
+- DGX uses the SAME `USER_TOKEN`, `SYSTEM_TOKEN`, and `FINGERPRINT` as Vast (verbatim
+  from `s3://rixtrema-qwentts/secrets/qwentts.env`). Don't invent a new fingerprint —
+  task_api just sees one worker identity, swapping which host owns it.
+- The DGX worker unit (`qwentts-worker.service`) is **disabled-on-boot** so a reboot
+  during the Vast era can't accidentally start a second listener.
 
-Until those are resolved, DGX runs only the API service — useful for local smoke /
-testing /admin dashboards but does not consume the prod queue.
+### What's pre-built on DGX
+
+- `qwentts.service` — API. Always running. Handles `/phrases` from the worker.
+- `qwentts-worker.service` — task_api listener (`python -m task_worker.main`).
+  **NOT enabled, NOT running by default.** Start manually only after Vast is down.
+
+Pre-flight sanity (no task is actually picked up — `list_tasks` is read-only):
+
+```bash
+sudo docker exec qwentts bash -c '
+set -a; source /opt/qwentts/qwentts.env; set +a
+cd /opt/qwentts
+python -c "
+from task_worker.task_api import list_tasks
+for s in [\"NEW\",\"IN_PROGRESS\",\"COMPLETED\",\"FAILED\"]:
+    print(s, len(list_tasks(task_type=\"QWEN_TTS_PHRASE\", statuses=[s], ignore_user_filter=True, page_size=10)))
+"'
+```
+
+If you get integer counts (any number, including 0) without an exception → auth and
+fingerprint are good, DGX is reading the same queue Vast does.
+
+### Cutover procedure
+
+The whole flip should take under a minute, with a small intentional drain gap so no task
+is processed twice.
+
+1. **On the laptop** — stop the Vast watchdog so it doesn't recreate the Vast instance:
+
+   ```powershell
+   Get-Process powershell | Where-Object { $_.CommandLine -like "*monitor-qwentts*" } | Stop-Process
+   # or: pkill -f monitor-qwentts.ps1   if using WSL/git-bash
+   ```
+
+2. **On the Vast.ai instance** (SSH or web console) — stop the task_worker:
+
+   ```bash
+   pkill -f "python -m task_worker.main"
+   sleep 5
+   pgrep -af "task_worker.main" || echo "Vast worker stopped"
+   ```
+
+   (Alternatively destroy the Vast.ai instance via web console — same effect.)
+
+3. **Drain pause** — wait ~30 s. Any in-flight Vast task finishes its current phrase and
+   the worker exits cleanly. Confirm via the Vast `/admin` page that `last_phrase_poll`
+   has stopped advancing.
+
+4. **On DGX** — start the worker:
+
+   ```bash
+   sudo systemctl start qwentts-worker
+   sleep 5
+   sudo systemctl status qwentts-worker --no-pager | head -15
+   sudo docker logs --tail=20 qwentts-worker
+   ```
+
+   First-minute checks:
+
+   ```bash
+   curl -fsS http://127.0.0.1:8010/health   # task_worker health endpoint
+   sudo docker logs --tail=30 -f qwentts-worker  # watch live
+   ```
+
+   Within ~10–15 s `last_phrase_poll` in `:8010/health` should start advancing. As soon as
+   a `NEW QWEN_TTS_PHRASE` lands in the queue, you'll see `task_worker.process_phrases.*`
+   timing log entries.
+
+### Rollback (one command)
+
+```bash
+sudo systemctl stop qwentts-worker
+```
+
+Then on the laptop restart the Vast watchdog (or run `start-qwentts.ps1` to recreate
+the Vast instance). Same drain pause applies in reverse.
+
+### Coexistence with llama-server (still open)
+
+`llama-server` (gpt-oss-120b) on this box holds ~64 GiB unified memory. We saw NVRM
+`Out of memory` when our 5 GiB Qwen-TTS tried to load while llama was up. With the
+worker running 24/7, every prod task triggers a Qwen forward pass — so if the neighbour
+is also live, expect intermittent failures.
+
+Options (negotiate with the owner before flipping):
+
+- **Window-based**: llama-server runs during the day, qwentts-worker at night, or vice
+  versa. Owner stops one, you `systemctl start/stop` the other.
+- **Llama footprint shrink**: drop `ctx-size` from 131072 → 32768 and switch KV-cache to
+  q4_0; frees ~30–40 GiB. May break some llama use cases.
+- **Hard split**: dedicate this DGX to qwentts, run llama elsewhere.
+
+Until a coexistence model is chosen, the safe operating mode is: stop llama → run
+qwentts-worker → stop qwentts-worker → start llama. The cutover above assumes llama is
+already stopped.
 
 ## Operational follow-ups
 
