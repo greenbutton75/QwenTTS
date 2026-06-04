@@ -176,6 +176,26 @@ def _wait_for_qwen_tts_ready(state: HealthState) -> None:
 _FNAME_PLACEHOLDER_RE = re.compile(r"@FNAME", re.IGNORECASE)
 
 
+def _strip_signoff_name(text: Any, first_name: Optional[str]) -> Any:
+    # Drop "Again, {first_name}" sign-off so the body becomes lead-agnostic and
+    # the same shared body audio can be reused from the S3 splice cache across
+    # leads. The chat-ai script tends to put the lead's name in both the
+    # greeting AND the closing ("Again, Kelvin— looking forward..."); the
+    # greeting is regenerated per lead anyway, but the trailing name forced
+    # the body cache to miss every time.
+    #
+    # Only strip the very specific "Again, NAME" pattern (case-insensitive).
+    # Other in-body name mentions are intentionally left alone to preserve
+    # meaning.
+    if not isinstance(text, str):
+        return text
+    name = str(first_name or "").strip()
+    if not name:
+        return text
+    pat = re.compile(rf"\bAgain,\s+{re.escape(name)}\b", re.IGNORECASE)
+    return pat.sub("Again", text)
+
+
 def _resolve_fname_placeholder(text: Any, params: Dict[str, Any]) -> Any:
     # Upstream chat-ai sometimes ships the raw "@FNAME" placeholder in `text`
     # instead of substituting the lead's first name. Without this fix the TTS
@@ -462,6 +482,7 @@ def process_phrases_batch(state: HealthState) -> None:
                 phrase_id = params.get("phrase_id")
                 text = params.get("text")
                 text = _resolve_fname_placeholder(text, params)
+                text = _strip_signoff_name(text, params.get("firstName") or params.get("first_name"))
                 if not support_id or not voice_id or not phrase_id or not text:
                     failed_task(task_id, error="missing support_id/voice_id/phrase_id/text")
                     state.inc_phrase_failed()
