@@ -228,14 +228,23 @@ services on this Mac (`~/Library/LaunchAgents/com.stochamodel.*.plist`):
 - **`com.qwentts.api`** — `RunAtLoad=true`, `KeepAlive` on crash. Safe to
   auto-start at boot; the API alone (no worker) does nothing to the shared
   queue.
-- **`com.qwentts.worker`** — `RunAtLoad=false` **deliberately**.
-  This queue has no server-side dedup by fingerprint — exactly one worker
-  may run anywhere in the world at a time, or two instances race the same
-  job and produce duplicate/corrupt output. Auto-starting this at every
-  boot without a human re-confirming no other instance (the DGX or
-  otherwise) is polling would be a real risk. It still gets `KeepAlive`
-  crash-restart once it *has* been started — that's just "don't die
-  silently," not "come alive on your own."
+- **`com.qwentts.worker`** — `RunAtLoad=true` **as of 2026-09-17, by
+  explicit owner decision**, trading away a safety margin for full
+  unattended recovery. This queue has no server-side dedup by
+  fingerprint — exactly one worker may run anywhere in the world at a
+  time, or two instances race the same job and produce duplicate/corrupt
+  output. `RunAtLoad=true` means this Mac will resume polling on its own
+  after every reboot with no human re-confirming that no other instance
+  (the DGX or otherwise) picked it up in the meantime. Acceptable only as
+  long as this Mac stays the sole instance of the worker anywhere; if that
+  ever changes, revisit this setting first. It also gets `KeepAlive`
+  crash-restart, same as before.
+
+  To go back to the more conservative setting (manual restart required
+  after every reboot, no auto-resume): edit `RunAtLoad` back to `false` in
+  `~/Library/LaunchAgents/com.qwentts.worker.plist`, then
+  `launchctl bootout gui/$(id -u)/com.qwentts.worker && launchctl bootstrap
+  gui/$(id -u) ~/Library/LaunchAgents/com.qwentts.worker.plist`.
 
 Both use Mac-adapted launcher scripts (`scripts/start-api-mac.sh`,
 `scripts/start-worker-mac.sh`) — adapted from the original
@@ -243,8 +252,12 @@ Both use Mac-adapted launcher scripts (`scripts/start-api-mac.sh`,
 port-check guard, which doesn't exist on macOS (replaced with `lsof`), and
 hardcode `/workspace/QwenTTS` + `/venv/main/bin/...` paths.
 
-**Starting the worker after a stop** (e.g. after a reboot, or after
-manually stopping it): re-run the pre-flight from
+**After a reboot**: the worker now resumes on its own (`RunAtLoad=true`,
+see above) — no manual step needed, by design, at the cost of the
+re-confirmation safety margin described above.
+
+**Starting the worker after a manual stop** (not a reboot — e.g. you ran
+`launchctl bootout` for maintenance): re-run the pre-flight from
 `docs/task_worker_deploy.md` / this migration's runbook (confirm no other
 instance polling — sample the `Tasks/List` NEW count twice a minute or so
 apart with nothing here running; if it drops, something else is
