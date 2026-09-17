@@ -64,12 +64,42 @@ def upload_torch(key: str, data: Any) -> None:
     upload_bytes(key, bio.getvalue(), "application/octet-stream")
 
 
+def _to_inference_dtype(obj: Any) -> Any:
+    """Recursively downcast bfloat16 tensors to float32 on non-CUDA hosts.
+
+    All cached torch objects in S3 (prompt.pt speaker embeddings, splice
+    body cache) were produced on the CUDA box in bfloat16. The live model
+    itself already loads as float32 on any non-CUDA device (see
+    server/tts.py::_get_model), and MPS (this Mac's backend, torch 2.2.2)
+    cannot hold a bfloat16 tensor on-device at all -- moving one over
+    raises "BFloat16 is not supported on MPS" before any dtype cast even
+    runs. Downcasting here, once, right after load, keeps every downstream
+    call site consistent with the live model's dtype without hunting down
+    each individual .to(device) call in the model code. CUDA path is
+    untouched (bfloat16 there is intended, not a bug).
+    """
+    import torch
+
+    if torch.cuda.is_available():
+        return obj
+    if isinstance(obj, torch.Tensor):
+        return obj.to(torch.float32) if obj.dtype == torch.bfloat16 else obj
+    if isinstance(obj, dict):
+        return {k: _to_inference_dtype(v) for k, v in obj.items()}
+    if isinstance(obj, list):
+        return [_to_inference_dtype(v) for v in obj]
+    if isinstance(obj, tuple):
+        return tuple(_to_inference_dtype(v) for v in obj)
+    return obj
+
+
 def download_torch(key: str) -> Any:
     import torch
 
     raw = download_bytes(key)
     bio = io.BytesIO(raw)
-    return torch.load(bio, map_location="cpu")
+    data = torch.load(bio, map_location="cpu")
+    return _to_inference_dtype(data)
 
 
 def delete_prefix(prefix: str) -> int:

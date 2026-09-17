@@ -134,6 +134,9 @@ def evaluate_candidate(
         trailing_rebound_artifact = bool(body_stats.get("trailing_rebound_artifact", 0))
         clipped_ending_artifact = bool(body_stats.get("clipped_ending_artifact", 0))
         raw_metrics["body_boundary"] = body_stats
+        body_duration_stats = tts.detect_body_excessive_duration_artifact(text, wav, sr)
+        duration_artifact = bool(body_duration_stats.get("artifact", 0))
+        raw_metrics["body_duration"] = body_duration_stats
 
     asr: Optional[ASRReport] = None
     if do_asr:

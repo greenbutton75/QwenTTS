@@ -92,6 +92,8 @@ def _seed(seed: Optional[int]) -> None:
         torch.manual_seed(seed)
         if torch.cuda.is_available():
             torch.cuda.manual_seed_all(seed)
+        if torch.backends.mps.is_available():
+            torch.mps.manual_seed(seed)
     except Exception:
         pass
 
@@ -188,6 +190,8 @@ def _body_is_good(report: "quality.QualityReport", max_wer: float) -> bool:
     if not report.similarity_passed:
         return False
     if report.start_artifact or report.trailing_rebound_artifact or report.clipped_ending_artifact:
+        return False
+    if report.duration_artifact:
         return False
     if report.asr is not None and report.asr.wer > max_wer:
         return False

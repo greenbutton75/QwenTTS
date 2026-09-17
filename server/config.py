@@ -83,6 +83,18 @@ GREETING_ONSET_ARTIFACT_CHECK = _get_env_bool("GREETING_ONSET_ARTIFACT_CHECK", T
 # unprotected full-phrase path. Detection still runs (diagnostics); it just no
 # longer rejects. Set the env var to true to restore hard-fail.
 GREETING_ONSET_ARTIFACT_REQUIRE_PASS = _get_env_bool("GREETING_ONSET_ARTIFACT_REQUIRE_PASS", False)
+# duration_artifact (excessive-length / trailing-noise-after-EOS render) is
+# scored into composite_score for best-of-N ranking but was never wired to a
+# hard-reject anywhere -- unlike onset/preroll/ending, there was no
+# *_REQUIRE_PASS gate for it at all. Found via real Mac Studio testing
+# 2026-09-17: a short "Hi <Name>." greeting kept winning best-of-4 despite an
+# audible trailing artifact, because onset/preroll/ending all scored clean
+# (false negative for this specific artifact shape) and only duration_artifact
+# caught it -- as a score penalty only, so the flawed candidate still won.
+# Default False (additive, matches every other REQUIRE_PASS flag's default);
+# same fallback-to-full-phrase safety net as the other REQUIRE_PASS gates
+# applies on reject, so enabling this is not a "fail with nothing" risk.
+GREETING_DURATION_ARTIFACT_REQUIRE_PASS = _get_env_bool("GREETING_DURATION_ARTIFACT_REQUIRE_PASS", False)
 GREETING_SPEAKER_SIMILARITY_RETRY_DO_SAMPLE = _get_env_bool("GREETING_SPEAKER_SIMILARITY_RETRY_DO_SAMPLE", True)
 GREETING_SPEAKER_SIMILARITY_RETRY_TEMPERATURE = _get_env_float("GREETING_SPEAKER_SIMILARITY_RETRY_TEMPERATURE", 0.3)
 GREETING_SPEAKER_SIMILARITY_RETRY_TOP_K = _get_env_int("GREETING_SPEAKER_SIMILARITY_RETRY_TOP_K", 8)

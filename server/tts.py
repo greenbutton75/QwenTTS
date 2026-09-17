@@ -67,6 +67,12 @@ _FATAL_CUDA_ERROR_MARKERS = (
 def _get_device() -> str:
     import torch
 
+    # Mac Studio (Apple Silicon): use Metal via MPS. Checked before CUDA
+    # since a host can't have both; falls through to CPU if neither is
+    # available. Added 2026-09-17 for the native macOS deployment -- the
+    # original code only ever ran on NVIDIA/CUDA boxes (Vast.ai, DGX Spark).
+    if torch.backends.mps.is_available():
+        return "mps"
     return "cuda" if torch.cuda.is_available() else "cpu"
 
 
@@ -988,6 +994,40 @@ def detect_greeting_excessive_duration_artifact(text: str, wav: np.ndarray, sr: 
     }
 
 
+def detect_body_excessive_duration_artifact(text: str, wav: np.ndarray, sr: int) -> Dict[str, float]:
+    """General duration sanity check for body text of any length.
+
+    detect_greeting_excessive_duration_artifact only handles the narrow
+    "Hi <Name>." pattern. Added 2026-09-17 after finding two real body-side
+    runaway-noise defects in Mac Studio testing: a cached body with several
+    seconds of stray noise before the real words, and an 11s render of text
+    that should take ~6-7s. Both passed every existing check (similarity,
+    ASR-WER, boundary artifacts) -- ASR doesn't transcribe non-lexical noise
+    as extra words, so nothing flagged either one.
+
+    Rough estimate: natural speech runs ~2.3 words/sec including short
+    pauses. Flag only when duration is both a large ratio over the estimate
+    AND several real seconds over it, so naturally slower/more deliberate
+    delivery on ordinary text doesn't get falsely rejected.
+    """
+    audio = _normalize_audio(wav)
+    duration_ms = int(round(audio.shape[0] * 1000.0 / max(int(sr), 1)))
+    default = {"artifact": 0, "checked": 0, "duration_ms": duration_ms, "expected_max_ms": 0}
+    words = len((text or "").split())
+    if words == 0:
+        return default
+    expected_ms = int((words / 2.3) * 1000.0)
+    expected_max_ms = max(int(expected_ms * 1.8) + 1500, 2500)
+    excess_ms = duration_ms - expected_max_ms
+    artifact = int(duration_ms > expected_max_ms and excess_ms >= 2000)
+    return {
+        "artifact": artifact,
+        "checked": 1,
+        "duration_ms": duration_ms,
+        "expected_max_ms": expected_max_ms,
+    }
+
+
 def _find_active_run_start(active: np.ndarray, min_run: int) -> Optional[int]:
     run = 0
     for idx, value in enumerate(active):
@@ -1717,16 +1757,25 @@ def clean_output_audio_preserve_tail(wav: np.ndarray, sr: int) -> Tuple[np.ndarr
 
 
 def clean_output_audio_for_greeting(text: str, wav: np.ndarray, sr: int) -> Tuple[np.ndarray, int, Dict[str, int]]:
-    if isinstance(text, str) and _SHORT_GREETING_RE.match(text):
-        return _clean_output_audio_impl(
-            wav,
-            sr,
-            pad_ms=max(int(OUTPUT_AUDIO_TRIM_PAD_MS), int(GREETING_OUTPUT_TRIM_PAD_MS)),
-            max_leading_ms=OUTPUT_AUDIO_TRIM_MAX_LEADING_MS,
-            max_trailing_ms=0,
-            allow_leading_artifact_trim=True,
-        )
-    return clean_output_audio_preserve_start(wav, sr)
+    # Was gated on _SHORT_GREETING_RE ("Hi <Name>." / "Hello <Name>." only) --
+    # any other greeting phrasing fell through to clean_output_audio_preserve_start,
+    # which allows trailing trim up to OUTPUT_AUDIO_TRIM_MAX_TRAILING_MS and does
+    # not set preserve_tail. Found via real testing 2026-09-17: "Good afternoon,
+    # Alex." came back as "Good afternoon, Alek" -- the trailing "s" clipped off,
+    # something the Hi/Hello path is specifically hardened against. A greeting is
+    # a short opener regardless of wording (no reason "Hi"/"Hello" specifically
+    # need the protection and nothing else does), so apply the same protected
+    # settings unconditionally: no trailing edge/boundary-artifact trim, and
+    # preserve_tail so the clarity-refinement stages don't clip it either.
+    return _clean_output_audio_impl(
+        wav,
+        sr,
+        pad_ms=max(int(OUTPUT_AUDIO_TRIM_PAD_MS), int(GREETING_OUTPUT_TRIM_PAD_MS)),
+        max_leading_ms=OUTPUT_AUDIO_TRIM_MAX_LEADING_MS,
+        max_trailing_ms=0,
+        allow_leading_artifact_trim=True,
+        preserve_tail=True,
+    )
 
 
 def clean_output_audio_without_leading_trim(wav: np.ndarray, sr: int) -> Tuple[np.ndarray, int, Dict[str, int]]:
@@ -1932,6 +1981,17 @@ def splice_speech_segments(
     sr = int(sample_rate)
     pause_ms = max(0, int(pause_ms))
     crossfade_ms = max(0, int(crossfade_ms))
+
+    # Greeting and body come from separate model calls and can land at very
+    # different natural loudness (observed ~14 dB gap on this Mac's
+    # generations -- greeting rendering noticeably quieter than the body).
+    # The single _normalize_loudness_rms() call below only levels the final
+    # COMBINED signal, which does nothing to fix an imbalance between the
+    # two segments feeding into it (whichever is louder/longer just
+    # dominates the measurement). Level each segment to the same target
+    # independently, first, so splicing joins two comparably-loud clips.
+    g = _normalize_loudness_rms(g, target_lufs=target_lufs)
+    b = _normalize_loudness_rms(b, target_lufs=target_lufs)
 
     if not content_aware:
         out = _simple_splice(g, b, sr=sr, pause_ms=pause_ms, crossfade_ms=crossfade_ms)

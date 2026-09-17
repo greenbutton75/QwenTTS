@@ -31,6 +31,11 @@ tmp/
 .env
 qwentts.env
 **/.env
+secrets/
+
+# Mac Studio native deployment (this repo's own instructions were to keep
+# the venv isolated from other services on the host; never commit it)
+.venv-qwentts/
 
 # Portable runtime artifacts
 portable/cache/
